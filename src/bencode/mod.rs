@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 pub mod parser;
@@ -57,7 +58,7 @@ pub struct Metainfo {
     pub info: Info,
     pub announce: String,
     pub announce_list: Option<Vec<Vec<String>>>,
-    pub creation_date: Option<i64>,
+    pub creation_date: Option<DateTime<Utc>>,
     pub comment: Option<String>,
     pub created_by: Option<String>,
     pub encoding: Option<String>,
@@ -247,7 +248,9 @@ impl Metainfo {
         let creation_date = dict
             .get("creation date")
             .map(|v| match v {
-                BencodeValue::Int(i) => Ok(*i),
+                BencodeValue::Int(i) => DateTime::from_timestamp(*i, 0)
+                    .ok_or("Invalid 'creation date' attribute".to_string()),
+
                 _ => return Err("Invalid 'creation date' attribute".to_string()),
             })
             .transpose()?;
