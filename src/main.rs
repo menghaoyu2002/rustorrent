@@ -1,7 +1,7 @@
 use std::{fs::File, io::Read};
 
 use clap::Parser;
-use rustorrent::bencode::parser::parse_bencode;
+use rustorrent::bencode::BencodeValue;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -26,7 +26,7 @@ fn main() {
         }
     };
 
-    let Ok((parsed_value, rest)) = parse_bencode(&file_content) else {
+    let Ok((parsed_value, rest)) = BencodeValue::parse(&file_content) else {
         eprintln!("Error parsing bencode");
         return;
     };

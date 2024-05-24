@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
-pub mod parser;
+mod encoder;
+mod parser;
 
 #[derive(Debug, PartialEq)]
 pub enum BencodeString {
@@ -297,5 +298,13 @@ impl BencodeValue {
             BencodeValue::Dict(dict) => Metainfo::dict_to_metainfo(&dict),
             _ => Err("Invalid metainfo".to_string()),
         }
+    }
+
+    pub fn decode(&self) -> Vec<u8> {
+        encoder::encode_bencode(self)
+    }
+
+    pub fn parse(data: &Vec<u8>) -> Result<(BencodeValue, Vec<u8>), String> {
+        parser::parse_bencode(data)
     }
 }
