@@ -29,7 +29,7 @@ pub struct BaseInfo {
 pub struct SingleFileInfo {
     pub base_info: BaseInfo,
     pub name: String,
-    pub length: Option<i64>,
+    pub length: i64,
     pub md5sum: Option<String>,
 }
 
@@ -65,13 +65,6 @@ pub struct Metainfo {
 }
 
 impl Metainfo {
-    pub fn new(parsed_bencode: &BencodeValue) -> Result<Metainfo, String> {
-        match parsed_bencode {
-            BencodeValue::Dict(dict) => Metainfo::dict_to_metainfo(&dict),
-            _ => Err("Invalid metainfo".to_string()),
-        }
-    }
-
     fn dict_to_base_info(dict: &HashMap<String, BencodeValue>) -> Result<BaseInfo, String> {
         let pieces = match dict.get("pieces") {
             Some(BencodeValue::String(BencodeString::Bytes(b))) => b.clone(),
@@ -108,13 +101,10 @@ impl Metainfo {
             _ => return Err("Invalid 'name' attribute".to_string()),
         };
 
-        let length = dict
-            .get("length")
-            .map(|v| match v {
-                BencodeValue::Int(i) => Ok(*i),
-                _ => Err("Invalid 'length' attribute".to_string()),
-            })
-            .transpose()?;
+        let length = match dict.get("length") {
+            Some(BencodeValue::Int(i)) => *i,
+            _ => return Err("Invalid 'length' attribute".to_string()),
+        };
 
         let md5sum = dict
             .get("md5sum")
@@ -298,5 +288,14 @@ impl Metainfo {
             created_by,
             encoding,
         })
+    }
+}
+
+impl BencodeValue {
+    pub fn to_metainfo(&self) -> Result<Metainfo, String> {
+        match self {
+            BencodeValue::Dict(dict) => Metainfo::dict_to_metainfo(&dict),
+            _ => Err("Invalid metainfo".to_string()),
+        }
     }
 }

@@ -1,7 +1,7 @@
 use std::{fs::File, io::Read};
 
 use clap::Parser;
-use rustorrent::bencode::{parser::parse_bencode, Metainfo};
+use rustorrent::bencode::parser::parse_bencode;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -26,8 +26,16 @@ fn main() {
         }
     };
 
-    let (parsed_value, rest) = parse_bencode(&file_content).unwrap();
+    let Ok((parsed_value, rest)) = parse_bencode(&file_content) else {
+        eprintln!("Error parsing bencode");
+        return;
+    };
     assert!(rest.is_empty(), "Torrent file is not fully parsed");
-    let metainfo = Metainfo::new(&parsed_value).unwrap();
+
+    let Ok(metainfo) = parsed_value.to_metainfo() else {
+        eprintln!("Error parsing metainfo");
+        return;
+    };
+
     println!("{:#?}", metainfo);
 }
