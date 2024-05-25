@@ -1,20 +1,18 @@
 use rand::Rng;
-use sha1::{Digest, Sha1};
 
 use crate::bencode::{BencodeString, BencodeValue, Metainfo};
 
 #[derive(Debug)]
 pub struct Tracker {
-    torrent_content: BencodeValue,
-    metainfo: Metainfo,
-    peer_id: String,
+    pub metainfo: Metainfo,
+    pub peer_id: String,
 }
 
 #[derive(Debug)]
 pub struct PeerDict {
-    ip: String,
-    port: i64,
-    peer_id: String,
+    pub ip: String,
+    pub port: i64,
+    pub peer_id: String,
 }
 
 #[derive(Debug)]
@@ -25,17 +23,17 @@ pub enum Peers {
 
 #[derive(Debug)]
 pub struct TrackerSuccessResponse {
-    interval: i64,
-    min_interval: Option<i64>,
-    tracker_id: Option<String>,
-    complete: i64,
-    incomplete: i64,
-    peers: Peers,
+    pub interval: i64,
+    pub min_interval: Option<i64>,
+    pub tracker_id: Option<String>,
+    pub complete: i64,
+    pub incomplete: i64,
+    pub peers: Peers,
 }
 
 #[derive(Debug)]
 pub struct TrackerFailureResponse {
-    failure_reason: String,
+    pub failure_reason: String,
 }
 
 #[derive(Debug)]
@@ -46,10 +44,9 @@ pub enum TrackerResponse {
 
 impl Tracker {
     pub fn new(torrent_content: BencodeValue) -> Self {
-        let metainfo = torrent_content.to_metainfo().expect("Invalid metainfo");
+        let metainfo = Metainfo::new(torrent_content).expect("Invalid metainfo");
 
         Self {
-            torrent_content,
             metainfo,
             peer_id: Tracker::get_peer_id(),
         }
@@ -176,20 +173,24 @@ impl Tracker {
     pub async fn get_announce(&self) -> Result<TrackerResponse, String> {
         let mut url = String::from(&self.metainfo.announce);
 
-        let info_hash = self.get_info_hash().expect("Error getting info hash");
+        let info_hash = self
+            .metainfo
+            .get_info_hash()
+            .expect("Error getting info hash");
         url.push_str(format!("?info_hash={}", info_hash).as_str());
         url.push_str(format!("&peer_id={}", self.peer_id).as_str());
         url.push_str("&port=6881");
 
         println!("GET {}", &url);
         let response = reqwest::get(&url).await.map_err(|e| e.to_string())?;
-        println!("{:#?}", response);
+        println!("GET {}", response.status());
 
         let bytes = response
             .bytes()
             .await
             .map_err(|_| String::from("unable to parse response body"))?
             .to_vec();
+
         let (parsed_bencode, _) = BencodeValue::parse(&bytes).expect("Error parsing response");
         Tracker::to_tracker_response(&parsed_bencode)
     }
@@ -202,21 +203,5 @@ impl Tracker {
             peer_id.push(random_char);
         }
         peer_id
-    }
-
-    fn get_info_hash(&self) -> Result<String, String> {
-        let info = match self.torrent_content.get_value("info") {
-            Some(info) => info,
-            None => return Err("info key not found".to_string()),
-        };
-
-        let info_bencoded = info.encode();
-
-        let mut hasher = Sha1::new();
-        hasher.update(info_bencoded);
-        let result = hasher.finalize();
-        let info_hash = url::form_urlencoded::byte_serialize(&result).collect::<String>();
-
-        Ok(info_hash)
     }
 }

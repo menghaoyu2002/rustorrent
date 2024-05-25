@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use sha1::{Digest, Sha1};
 use std::collections::BTreeMap;
 
 mod encoder;
@@ -56,6 +57,8 @@ pub enum Info {
 
 #[derive(Debug)]
 pub struct Metainfo {
+    torrent_content: BencodeValue,
+
     pub info: Info,
     pub announce: String,
     pub announce_list: Option<Vec<Vec<String>>>,
@@ -66,6 +69,29 @@ pub struct Metainfo {
 }
 
 impl Metainfo {
+    pub fn new(bencode_value: BencodeValue) -> Result<Metainfo, String> {
+        match bencode_value.clone() {
+            BencodeValue::Dict(dict) => Metainfo::dict_to_metainfo(bencode_value, &dict),
+            _ => Err("Invalid metainfo".to_string()),
+        }
+    }
+
+    pub fn get_info_hash(&self) -> Result<String, String> {
+        let info = match self.torrent_content.get_value("info") {
+            Some(info) => info,
+            None => return Err("info key not found".to_string()),
+        };
+
+        let info_bencoded = info.encode();
+
+        let mut hasher = Sha1::new();
+        hasher.update(info_bencoded);
+        let result = hasher.finalize();
+        let info_hash = url::form_urlencoded::byte_serialize(&result).collect::<String>();
+
+        Ok(info_hash)
+    }
+
     fn dict_to_base_info(dict: &BTreeMap<String, BencodeValue>) -> Result<BaseInfo, String> {
         let pieces = match dict.get("pieces") {
             Some(BencodeValue::String(BencodeString::Bytes(b))) => b.clone(),
@@ -230,7 +256,10 @@ impl Metainfo {
         }
     }
 
-    fn dict_to_metainfo(dict: &BTreeMap<String, BencodeValue>) -> Result<Metainfo, String> {
+    fn dict_to_metainfo(
+        bencode_value: BencodeValue,
+        dict: &BTreeMap<String, BencodeValue>,
+    ) -> Result<Metainfo, String> {
         let announce = match dict.get("announce") {
             Some(BencodeValue::String(BencodeString::String(s))) => s.clone(),
             _ => return Err("Invalid 'announce' attribute".to_string()),
@@ -281,6 +310,7 @@ impl Metainfo {
             .transpose()?;
 
         Ok(Metainfo {
+            torrent_content: bencode_value,
             info,
             announce,
             announce_list,
@@ -301,17 +331,36 @@ impl BencodeValue {
         parser::parse_bencode(data)
     }
 
-    pub fn to_metainfo(&self) -> Result<Metainfo, String> {
-        match self {
-            BencodeValue::Dict(dict) => Metainfo::dict_to_metainfo(&dict),
-            _ => Err("Invalid metainfo".to_string()),
-        }
-    }
-
     pub fn get_value(&self, key: &str) -> Option<&BencodeValue> {
         match self {
             BencodeValue::Dict(dict) => dict.get(key),
             _ => None,
+        }
+    }
+
+    pub fn clone(&self) -> BencodeValue {
+        match self {
+            BencodeValue::String(BencodeString::String(s)) => {
+                BencodeValue::String(BencodeString::String(s.clone()))
+            }
+            BencodeValue::String(BencodeString::Bytes(b)) => {
+                BencodeValue::String(BencodeString::Bytes(b.clone()))
+            }
+            BencodeValue::Int(i) => BencodeValue::Int(*i),
+            BencodeValue::List(l) => {
+                let mut result = Vec::new();
+                for item in l {
+                    result.push(item.clone());
+                }
+                BencodeValue::List(result)
+            }
+            BencodeValue::Dict(d) => {
+                let mut result = BTreeMap::new();
+                for (k, v) in d {
+                    result.insert(k.clone(), v.clone());
+                }
+                BencodeValue::Dict(result)
+            }
         }
     }
 }

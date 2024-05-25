@@ -40,5 +40,5 @@ async fn main() {
     let tracker = Tracker::new(bencode_value);
 
     let response = tracker.get_announce().await.unwrap();
-    println!("Response: {:#?}", response);
+    println!("Tracker Response: {:#?}", response);
 }
