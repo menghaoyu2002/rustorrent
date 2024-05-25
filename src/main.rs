@@ -37,14 +37,8 @@ async fn main() {
         return;
     }
 
-    let Ok(metainfo) = bencode_value.to_metainfo() else {
-        eprintln!("Error parsing metainfo");
-        return;
-    };
-
     let tracker = Tracker::new(bencode_value);
 
     let response = tracker.get_announce().await.unwrap();
-    println!("Response: {:?}", String::from_utf8_lossy(&response));
-    println!("{:?}", BencodeValue::parse(&response).unwrap());
+    println!("Response: {:#?}", response);
 }
