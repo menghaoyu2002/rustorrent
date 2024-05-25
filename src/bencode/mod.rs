@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 mod encoder;
 mod parser;
@@ -15,7 +15,7 @@ pub enum BencodeValue {
     String(BencodeString),
     Int(i64),
     List(Vec<BencodeValue>),
-    Dict(HashMap<String, BencodeValue>),
+    Dict(BTreeMap<String, BencodeValue>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -66,7 +66,7 @@ pub struct Metainfo {
 }
 
 impl Metainfo {
-    fn dict_to_base_info(dict: &HashMap<String, BencodeValue>) -> Result<BaseInfo, String> {
+    fn dict_to_base_info(dict: &BTreeMap<String, BencodeValue>) -> Result<BaseInfo, String> {
         let pieces = match dict.get("pieces") {
             Some(BencodeValue::String(BencodeString::Bytes(b))) => b.clone(),
             _ => return Err("Invalid 'pieces' attribute".to_string()),
@@ -93,7 +93,7 @@ impl Metainfo {
     }
 
     fn dict_to_single_file_info(
-        dict: &HashMap<String, BencodeValue>,
+        dict: &BTreeMap<String, BencodeValue>,
     ) -> Result<SingleFileInfo, String> {
         let base_info = Metainfo::dict_to_base_info(dict)?;
 
@@ -124,7 +124,7 @@ impl Metainfo {
     }
 
     fn dict_to_multiple_file_info(
-        dict: &HashMap<String, BencodeValue>,
+        dict: &BTreeMap<String, BencodeValue>,
     ) -> Result<MultiFileInfo, String> {
         let base_info = Metainfo::dict_to_base_info(dict)?;
 
@@ -189,7 +189,7 @@ impl Metainfo {
         })
     }
 
-    fn dict_to_info(dict: &HashMap<String, BencodeValue>) -> Result<Info, String> {
+    fn dict_to_info(dict: &BTreeMap<String, BencodeValue>) -> Result<Info, String> {
         match dict.get("files") {
             Some(BencodeValue::List(_)) => {
                 let info = Metainfo::dict_to_multiple_file_info(dict)?;
@@ -230,7 +230,7 @@ impl Metainfo {
         }
     }
 
-    fn dict_to_metainfo(dict: &HashMap<String, BencodeValue>) -> Result<Metainfo, String> {
+    fn dict_to_metainfo(dict: &BTreeMap<String, BencodeValue>) -> Result<Metainfo, String> {
         let announce = match dict.get("announce") {
             Some(BencodeValue::String(BencodeString::String(s))) => s.clone(),
             _ => return Err("Invalid 'announce' attribute".to_string()),
@@ -293,6 +293,14 @@ impl Metainfo {
 }
 
 impl BencodeValue {
+    pub fn encode(&self) -> Vec<u8> {
+        encoder::encode_bencode(self)
+    }
+
+    pub fn parse(data: &Vec<u8>) -> Result<(BencodeValue, Vec<u8>), String> {
+        parser::parse_bencode(data)
+    }
+
     pub fn to_metainfo(&self) -> Result<Metainfo, String> {
         match self {
             BencodeValue::Dict(dict) => Metainfo::dict_to_metainfo(&dict),
@@ -300,11 +308,10 @@ impl BencodeValue {
         }
     }
 
-    pub fn decode(&self) -> Vec<u8> {
-        encoder::encode_bencode(self)
-    }
-
-    pub fn parse(data: &Vec<u8>) -> Result<(BencodeValue, Vec<u8>), String> {
-        parser::parse_bencode(data)
+    pub fn get_value(&self, key: &str) -> Option<&BencodeValue> {
+        match self {
+            BencodeValue::Dict(dict) => dict.get(key),
+            _ => None,
+        }
     }
 }

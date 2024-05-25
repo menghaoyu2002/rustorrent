@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use super::{BencodeString, BencodeValue};
 
@@ -125,7 +125,7 @@ fn parse_list(input: &Vec<u8>) -> Result<(Vec<BencodeValue>, Vec<u8>), String> {
     ))
 }
 
-fn parse_dict(input: &Vec<u8>) -> Result<(HashMap<String, BencodeValue>, Vec<u8>), String> {
+fn parse_dict(input: &Vec<u8>) -> Result<(BTreeMap<String, BencodeValue>, Vec<u8>), String> {
     if input.get(0) != Some(&b'd') {
         return Err(format!(
             "Invalid Bencode Dict '{}'",
@@ -134,7 +134,7 @@ fn parse_dict(input: &Vec<u8>) -> Result<(HashMap<String, BencodeValue>, Vec<u8>
     }
 
     let mut rest = input[1..].to_vec();
-    let mut dict = HashMap::new();
+    let mut dict = BTreeMap::new();
     while let Some(char) = rest.get(0) {
         if *char == b'e' {
             return Ok((dict, rest[1..].to_vec()));
@@ -294,7 +294,7 @@ mod tests {
         );
         assert_eq!(
             Ok((
-                vec![BencodeValue::Dict(HashMap::from([(
+                vec![BencodeValue::Dict(BTreeMap::from([(
                     "test".to_string(),
                     BencodeValue::String(BencodeString::String("value".to_string()))
                 )])),],
@@ -316,12 +316,12 @@ mod tests {
     #[test]
     fn test_parse_dict() {
         assert_eq!(
-            Ok((HashMap::new(), Vec::new())),
+            Ok((BTreeMap::new(), Vec::new())),
             parse_dict(&to_byte_vec("de"))
         );
         assert_eq!(
             Ok((
-                HashMap::from([
+                BTreeMap::from([
                     (
                         "spam".to_string(),
                         BencodeValue::String(BencodeString::String("egg".to_string()))
@@ -334,7 +334,7 @@ mod tests {
         );
         assert_eq!(
             Ok((
-                HashMap::from([
+                BTreeMap::from([
                     (
                         "spam".to_string(),
                         BencodeValue::String(BencodeString::String("egg".to_string()))

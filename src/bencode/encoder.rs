@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use super::{BencodeString, BencodeValue};
 
@@ -36,7 +36,7 @@ fn encode_list(list: &Vec<BencodeValue>) -> Vec<u8> {
     result
 }
 
-fn encode_dict(dict: &HashMap<String, BencodeValue>) -> Vec<u8> {
+fn encode_dict(dict: &BTreeMap<String, BencodeValue>) -> Vec<u8> {
     let mut result = Vec::new();
     result.push(b'd');
 
@@ -87,17 +87,22 @@ mod tests {
 
     #[test]
     fn test_encode_dict() {
-        let mut input = HashMap::new();
+        let mut input = BTreeMap::new();
         input.insert("key".to_string(), BencodeValue::Int(123));
+        input.insert(
+            "key2".to_string(),
+            BencodeValue::String(BencodeString::String("hello".to_string())),
+        );
 
-        // can only test the first key-value pair since the order of the keys in the dict is not guaranteed
-        let expected = "d3:keyi123ee".as_bytes();
+        let expected = "d3:keyi123e4:key25:helloe".as_bytes();
         assert_eq!(encode_dict(&input), expected);
     }
 
     #[test]
     fn test_encode_bencode() {
-        let input = "d4:listli123e5:helloee".as_bytes().to_vec();
+        let input = "d3:keyd3:keyd3:key5:valuee4:listli123e5:Hello5:Worldeee"
+            .as_bytes()
+            .to_vec();
         let (parsed, _) = parse_bencode(&input).unwrap();
         assert_eq!(encode_bencode(&parsed), input);
     }

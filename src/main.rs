@@ -1,7 +1,7 @@
 use std::{fs::File, io::Read};
 
 use clap::Parser;
-use rustorrent::bencode::BencodeValue;
+use rustorrent::{bencode::BencodeValue, tracker::Tracker};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -16,7 +16,8 @@ fn read_file(filename: &str) -> Result<Vec<u8>, std::io::Error> {
     Ok(contents)
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
     let file_content = match read_file(&args.file_path) {
         Ok(content) => content,
@@ -26,16 +27,24 @@ fn main() {
         }
     };
 
-    let Ok((parsed_value, rest)) = BencodeValue::parse(&file_content) else {
+    let Ok((bencode_value, rest)) = BencodeValue::parse(&file_content) else {
         eprintln!("Error parsing bencode");
         return;
     };
-    assert!(rest.is_empty(), "Torrent file is not fully parsed");
 
-    let Ok(metainfo) = parsed_value.to_metainfo() else {
+    if rest.len() > 0 {
+        eprintln!("Error parsing bencode: torrent file was not fully parsed");
+        return;
+    }
+
+    let Ok(metainfo) = bencode_value.to_metainfo() else {
         eprintln!("Error parsing metainfo");
         return;
     };
 
-    println!("{:#?}", metainfo);
+    let tracker = Tracker::new(bencode_value);
+
+    let response = tracker.get_announce().await.unwrap();
+    println!("Response: {:?}", String::from_utf8_lossy(&response));
+    println!("{:?}", BencodeValue::parse(&response).unwrap());
 }
