@@ -1,7 +1,7 @@
 use std::{fs::File, io::Read};
 
 use clap::Parser;
-use rustorrent::{bencode::BencodeValue, tracker::Tracker};
+use rustorrent::{bencode::BencodeValue, client::Client, tracker::Tracker};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -38,7 +38,10 @@ async fn main() {
     }
 
     let tracker = Tracker::new(bencode_value);
+    let Ok(mut client) = Client::new(tracker).await else {
+        eprintln!("Error creating client");
+        return;
+    };
 
-    let response = tracker.get_announce().await.unwrap();
-    println!("Tracker Response: {:#?}", response);
+    client.connect_to_peers(30).await.unwrap();
 }

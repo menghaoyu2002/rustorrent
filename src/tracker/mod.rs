@@ -1,3 +1,8 @@
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+};
+
 use rand::Rng;
 
 use crate::bencode::{BencodeString, BencodeValue, Metainfo};
@@ -9,17 +14,12 @@ pub struct Tracker {
 }
 
 #[derive(Debug)]
-pub struct PeerDict {
-    pub ip: String,
-    pub port: i64,
-    pub peer_id: String,
+pub struct Peer {
+    pub addr: SocketAddr,
+    pub peer_id: Option<String>,
 }
 
-#[derive(Debug)]
-pub enum Peers {
-    Dict(Vec<PeerDict>),
-    Binary(Vec<String>),
-}
+pub type Peers = Vec<Peer>;
 
 #[derive(Debug)]
 pub struct TrackerSuccessResponse {
@@ -52,16 +52,36 @@ impl Tracker {
         }
     }
 
+    pub async fn get_peers(&self) -> Result<Peers, String> {
+        let response = self.get_announce().await?;
+        let peers = match response {
+            TrackerResponse::Success(success_response) => success_response.peers,
+            TrackerResponse::Failure(failure_response) => {
+                return Err(format!(
+                    "Tracker failure: {}",
+                    failure_response.failure_reason
+                ))
+            }
+        };
+
+        Ok(peers)
+    }
+
     fn parse_peers(value: &BencodeValue) -> Result<Peers, String> {
         match value {
-            BencodeValue::String(BencodeString::Bytes(peers)) => {
-                let mut ips = Vec::new();
-                for peer in peers.chunks(6) {
-                    let ip = format!("{}.{}.{}.{}", peer[0], peer[1], peer[2], peer[3]);
+            BencodeValue::String(BencodeString::Bytes(raw_peers)) => {
+                let mut peers = Vec::new();
+                for peer in raw_peers.chunks(6) {
                     let port = u16::from(peer[4]) << 8 | u16::from(peer[5]);
-                    ips.push(format!("{}:{}", ip, port));
+                    peers.push(Peer {
+                        addr: SocketAddr::new(
+                            IpAddr::V4(Ipv4Addr::new(peer[0], peer[1], peer[2], peer[3])),
+                            port,
+                        ),
+                        peer_id: None,
+                    });
                 }
-                return Ok(Peers::Binary(ips));
+                return Ok(peers);
             }
             BencodeValue::List(peers) => {
                 let mut parsed_peers = Vec::new();
@@ -78,19 +98,28 @@ impl Tracker {
                                 _ => return Err("port key not found".to_string()),
                             };
 
-                            let peer_id = match dict.get("peer id") {
-                                Some(BencodeValue::String(BencodeString::String(peer_id))) => {
-                                    peer_id.clone()
-                                }
-                                _ => return Err("peer id key not found".to_string()),
-                            };
+                            let peer_id = dict
+                                .get("peer id")
+                                .map(|peer_id| match peer_id {
+                                    BencodeValue::String(BencodeString::String(peer_id)) => {
+                                        Some(peer_id.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .flatten();
 
-                            parsed_peers.push(PeerDict { ip, port, peer_id });
+                            parsed_peers.push(Peer {
+                                peer_id,
+                                addr: SocketAddr::new(
+                                    IpAddr::from_str(&ip).map_err(|_| "unable to parse ip")?,
+                                    port as u16,
+                                ),
+                            });
                         }
                         _ => return Err("invalid peers".to_string()),
                     }
                 }
-                return Ok(Peers::Dict(parsed_peers));
+                return Ok(parsed_peers);
             }
             _ => return Err("invalid peers".to_string()),
         }
