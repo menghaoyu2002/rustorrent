@@ -1,5 +1,5 @@
 use std::{
-    fmt::Debug,
+    fmt::{Debug, Display},
     io::{Read, Write},
     net::TcpStream,
     time::Duration,
@@ -7,16 +7,38 @@ use std::{
 
 use crate::tracker::{Peer, Tracker};
 
-const HANDSHAKE_LEN: usize = 68;
+const PSTR: &[u8; 19] = b"BitTorrent protocol";
+const HANDSHAKE_LEN: usize = 49 + PSTR.len();
 
 pub struct PeerConnectionError {
     pub peer: Peer,
 }
 
+pub enum HandshakePhase {
+    Send,
+    Receive,
+}
+
+impl Display for HandshakePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandshakePhase::Send => write!(f, "Send"),
+            HandshakePhase::Receive => write!(f, "Receive"),
+        }
+    }
+}
+
+pub struct HandshakeError {
+    peer: Peer,
+    handshake: Vec<u8>,
+    status: HandshakePhase,
+    message: String,
+}
+
 pub enum ClientError {
     ValidateHandshakeError(String),
     GetPeersError(String),
-    HandshakeError,
+    HandshakeError(HandshakeError),
 }
 
 impl Debug for ClientError {
@@ -24,7 +46,17 @@ impl Debug for ClientError {
         match self {
             ClientError::ValidateHandshakeError(e) => write!(f, "ValidateHandshakeError: {}", e),
             ClientError::GetPeersError(e) => write!(f, "GetPeersError: {}", e),
-            ClientError::HandshakeError => write!(f, "HandshakeError"),
+            ClientError::HandshakeError(e) => write!(
+                f,
+                "HandshakeError: Peer: {}, Status: {}, Message: {} Handshake: {}",
+                e.peer,
+                e.status,
+                e.message,
+                e.handshake
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>()
+            ),
         }
     }
 }
@@ -45,16 +77,16 @@ impl Client {
     fn get_handshake(&self) -> Result<Vec<u8>, ClientError> {
         let mut handshake = Vec::new();
 
-        let pstr = b"BitTorrent protocol";
         let info_hash = self
             .tracker
             .get_metainfo()
             .get_info_hash()
-            .map_err(|_| ClientError::HandshakeError)?;
+            .map_err(|_| ClientError::GetPeersError(String::from("Failed to get info hash")))?;
+
         let peer_id = self.tracker.peer_id();
 
-        handshake.push(pstr.len() as u8);
-        handshake.extend_from_slice(pstr);
+        handshake.push(PSTR.len() as u8);
+        handshake.extend_from_slice(PSTR);
         handshake.extend_from_slice(&[0; 8]);
         handshake.extend_from_slice(&info_hash);
         handshake.extend_from_slice(peer_id.as_bytes());
@@ -63,7 +95,7 @@ impl Client {
         Ok(handshake)
     }
 
-    fn validate_handshake(&self, handshake: &[u8]) -> Result<String, ClientError> {
+    fn validate_handshake(handshake: &[u8], info_hash: &Vec<u8>) -> Result<String, ClientError> {
         if handshake.len() != HANDSHAKE_LEN {
             return Err(ClientError::ValidateHandshakeError(
                 "Invalid handshake length".to_string(),
@@ -83,17 +115,12 @@ impl Client {
             ));
         }
 
-        if &handshake[20..28] != [0u8; 8] {
-            return Err(ClientError::ValidateHandshakeError(
-                "Invalid reserved bytes".to_string(),
-            ));
-        }
-
-        let info_hash = self
-            .tracker
-            .get_metainfo()
-            .get_info_hash()
-            .map_err(|_| ClientError::HandshakeError)?;
+        // don't need to validate reserved bytes
+        // if &handshake[20..28] != [0; 8] {
+        //     return Err(ClientError::ValidateHandshakeError(
+        //         "Invalid reserved bytes".to_string(),
+        //     ));
+        // }
 
         if &handshake[28..48] != info_hash {
             return Err(ClientError::ValidateHandshakeError(
@@ -101,8 +128,12 @@ impl Client {
             ));
         }
 
-        let peer_id = String::from_utf8(handshake[48..68].to_vec())
-            .map_err(|_| ClientError::HandshakeError)?;
+        let peer_id = String::from_utf8(handshake[48..68].to_vec()).map_err(|_| {
+            ClientError::ValidateHandshakeError(String::from(format!(
+                "Invalid peer id: {:?}",
+                String::from_utf8(handshake[48..68].to_vec())
+            )))
+        })?;
 
         Ok(peer_id)
     }
@@ -121,42 +152,41 @@ impl Client {
                 }
 
                 let handshake = self.get_handshake()?;
+                let info_hash = self.tracker.get_metainfo().get_info_hash().map_err(|_| {
+                    ClientError::GetPeersError(String::from("Failed to get info hash"))
+                })?;
+
                 let handle = tokio::spawn(async move {
                     match TcpStream::connect_timeout(&peer.addr, Duration::new(5, 0)) {
                         Ok(mut stream) => {
-                            println!("Connected to peer {}", peer.addr);
-                            match stream.write_all(&handshake) {
-                                Ok(_) => {
-                                    println!("Handshake sent to peer {}", peer.addr,);
-                                }
-                                Err(_) => {
-                                    return Err(format!(
-                                        "Failed to send handshake to peer {}",
-                                        peer.addr
-                                    ))
-                                }
-                            }
+                            stream.write_all(&handshake).map_err(|e| {
+                                ClientError::HandshakeError(HandshakeError {
+                                    peer: peer.clone(),
+                                    handshake: handshake.clone(),
+                                    status: HandshakePhase::Send,
+                                    message: e.to_string(),
+                                })
+                            })?;
 
-                            // if self.validate_handshake(&handshake).is_err() {
-                            //     return Err(format!("Invalid handshake from peer {}", peer.addr));
-                            // }
+                            let mut handshake_response = [0u8; HANDSHAKE_LEN];
+                            stream.read_exact(&mut handshake_response).map_err(|e| {
+                                ClientError::HandshakeError(HandshakeError {
+                                    peer: peer.clone(),
+                                    handshake: handshake_response.to_vec(),
+                                    status: HandshakePhase::Receive,
+                                    message: e.to_string(),
+                                })
+                            })?;
 
-                            let mut buf = [0u8; HANDSHAKE_LEN];
-                            match stream.read_exact(&mut buf) {
-                                Ok(()) => {
-                                    println!("Received handshake from peer {}", peer.addr,);
-                                }
-                                Err(_) => {
-                                    return Err(format!(
-                                        "Failed to read handshake from peer {}",
-                                        peer.addr
-                                    ))
-                                }
-                            }
+                            let peer_id =
+                                Client::validate_handshake(&handshake_response, &info_hash)?;
 
-                            Ok(stream)
+                            Ok((peer_id, stream))
                         }
-                        Err(_) => Err(format!("Failed to connect to peer {}", peer.addr)),
+                        Err(_) => Err(ClientError::GetPeersError(format!(
+                            "Failed to connect to peer {}",
+                            peer.addr
+                        ))),
                     }
                 });
                 handles.push(handle);
@@ -169,13 +199,18 @@ impl Client {
 
                 match handle
                     .await
-                    .map_err(|e| ClientError::GetPeersError(e.to_string()))?
+                    .map_err(|_| ClientError::GetPeersError(String::from("Failed to get peer")))?
                 {
-                    Ok(stream) => {
+                    Ok((peer_id, stream)) => {
+                        println!(
+                            "Connected to peer {} with id {}",
+                            stream.peer_addr().unwrap(),
+                            peer_id
+                        );
                         self.connections.push(stream);
                     }
                     Err(e) => {
-                        eprintln!("{}", e)
+                        eprintln!("{:?}", e);
                     }
                 }
             }

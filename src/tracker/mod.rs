@@ -1,5 +1,5 @@
 use std::{
-    fmt::Debug,
+    fmt::{Debug, Display},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
 };
@@ -59,6 +59,24 @@ pub struct Tracker {
 pub struct Peer {
     pub addr: SocketAddr,
     pub peer_id: Option<String>,
+}
+
+impl Clone for Peer {
+    fn clone(&self) -> Self {
+        Self {
+            addr: self.addr,
+            peer_id: self.peer_id.clone(),
+        }
+    }
+}
+
+impl Display for Peer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.peer_id {
+            Some(peer_id) => write!(f, "{}: {}", peer_id, self.addr),
+            None => write!(f, "{}", self.addr),
+        }
+    }
 }
 
 pub type Peers = Vec<Peer>;

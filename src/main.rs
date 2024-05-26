@@ -41,7 +41,7 @@ async fn main() {
     let mut client = Client::new(tracker);
 
     client
-        .connect_to_peers(1)
+        .connect_to_peers(10)
         .await
         .expect("Failed to connect to peers");
 }
