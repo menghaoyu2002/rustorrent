@@ -48,7 +48,7 @@ impl Debug for ClientError {
             ClientError::GetPeersError(e) => write!(f, "GetPeersError: {}", e),
             ClientError::HandshakeError(e) => write!(
                 f,
-                "HandshakeError: Peer: {}, Status: {}, Message: {} Handshake: {}",
+                "HandshakeError: Peer: {}, Status: {}, Message: {} Handshake:\n{}",
                 e.peer,
                 e.status,
                 e.message,
@@ -114,13 +114,6 @@ impl Client {
                 "Invalid protocol string".to_string(),
             ));
         }
-
-        // don't need to validate reserved bytes
-        // if &handshake[20..28] != [0; 8] {
-        //     return Err(ClientError::ValidateHandshakeError(
-        //         "Invalid reserved bytes".to_string(),
-        //     ));
-        // }
 
         if &handshake[28..48] != info_hash {
             return Err(ClientError::ValidateHandshakeError(
@@ -199,12 +192,14 @@ impl Client {
 
                 match handle
                     .await
-                    .map_err(|_| ClientError::GetPeersError(String::from("Failed to get peer")))?
+                    .map_err(|e| ClientError::GetPeersError(String::from(e.to_string())))?
                 {
                     Ok((peer_id, stream)) => {
                         println!(
                             "Connected to peer {} with id {}",
-                            stream.peer_addr().unwrap(),
+                            stream.peer_addr().map_err(|_| {
+                                ClientError::GetPeersError(String::from("Failed to get peer addr"))
+                            })?,
                             peer_id
                         );
                         self.connections.push(stream);
