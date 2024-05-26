@@ -38,7 +38,7 @@ async fn main() {
     }
 
     let tracker = Tracker::new(bencode_value);
-    let Ok(mut client) = Client::new(tracker).await else {
+    let Ok(mut client) = Client::new(tracker) else {
         eprintln!("Error creating client");
         return;
     };
