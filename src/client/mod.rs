@@ -35,11 +35,11 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(tracker: Tracker) -> Result<Self, String> {
-        Ok(Self {
+    pub fn new(tracker: Tracker) -> Self {
+        Self {
             tracker,
             connections: Vec::new(),
-        })
+        }
     }
 
     fn get_handshake(&self) -> Result<Vec<u8>, ClientError> {

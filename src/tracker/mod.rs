@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
 };
@@ -16,6 +17,16 @@ pub struct InvalidResponseError {
     pub message: String,
 }
 
+impl Debug for InvalidResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "InvalidResponseError: url: {}, status: {}, message: {}",
+            self.url, self.status, self.message
+        )
+    }
+}
+
 pub enum TrackerError {
     InvalidMetainfo,
     InvalidInfoHash,
@@ -23,6 +34,19 @@ pub enum TrackerError {
     GetAccounceError(String),
     InvalidResponse(InvalidResponseError),
     ResponseParseError(String),
+}
+
+impl Debug for TrackerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrackerError::InvalidMetainfo => write!(f, "InvalidMetainfo"),
+            TrackerError::InvalidInfoHash => write!(f, "InvalidInfoHash"),
+            TrackerError::GetPeersFailure(e) => write!(f, "GetPeersFailure: {}", e),
+            TrackerError::GetAccounceError(e) => write!(f, "GetAccounceError: {}", e),
+            TrackerError::InvalidResponse(e) => write!(f, "InvalidResponse: {:?}", e),
+            TrackerError::ResponseParseError(e) => write!(f, "ResponseParseError: {}", e),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -61,13 +85,13 @@ pub enum TrackerResponse {
 }
 
 impl Tracker {
-    pub fn new(torrent_content: BencodeValue) -> Self {
-        let metainfo = Metainfo::new(torrent_content).expect("Invalid metainfo");
+    pub fn new(torrent_content: BencodeValue) -> Result<Self, TrackerError> {
+        let metainfo = Metainfo::new(torrent_content).map_err(|_| TrackerError::InvalidMetainfo)?;
 
-        Self {
+        Ok(Self {
             metainfo,
             peer_id: Tracker::get_peer_id(),
-        }
+        })
     }
 
     pub fn get_metainfo(&self) -> &Metainfo {

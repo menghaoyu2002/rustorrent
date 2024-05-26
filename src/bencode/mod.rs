@@ -30,23 +30,8 @@ pub enum BencodeValue {
     Dict(BTreeMap<String, BencodeValue>),
 }
 
-impl BencodeValue {
-    pub fn encode(&self) -> Vec<u8> {
-        encoder::encode_bencode(self)
-    }
-
-    pub fn parse(data: &Vec<u8>) -> Result<(BencodeValue, Vec<u8>), ParseError> {
-        parser::parse_bencode(data)
-    }
-
-    pub fn get_value(&self, key: &str) -> Option<&BencodeValue> {
-        match self {
-            BencodeValue::Dict(dict) => dict.get(key),
-            _ => None,
-        }
-    }
-
-    pub fn clone(&self) -> BencodeValue {
+impl Clone for BencodeValue {
+    fn clone(&self) -> BencodeValue {
         match self {
             BencodeValue::String(BencodeString::String(s)) => {
                 BencodeValue::String(BencodeString::String(s.clone()))
@@ -69,6 +54,23 @@ impl BencodeValue {
                 }
                 BencodeValue::Dict(result)
             }
+        }
+    }
+}
+
+impl BencodeValue {
+    pub fn encode(&self) -> Vec<u8> {
+        encoder::encode_bencode(self)
+    }
+
+    pub fn parse(data: &Vec<u8>) -> Result<(BencodeValue, Vec<u8>), ParseError> {
+        parser::parse_bencode(data)
+    }
+
+    pub fn get_value(&self, key: &str) -> Option<&BencodeValue> {
+        match self {
+            BencodeValue::Dict(dict) => dict.get(key),
+            _ => None,
         }
     }
 }

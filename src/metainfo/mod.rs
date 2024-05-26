@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Debug};
 
 use chrono::{DateTime, Utc};
 use sha1::{Digest, Sha1};
@@ -54,18 +54,44 @@ pub struct Metainfo {
     pub encoding: Option<String>,
 }
 
+pub struct AttributeError {
+    pub content: BencodeValue,
+    pub attribute: String,
+}
+
+pub enum MetaInfoError {
+    InvalidAttribute(AttributeError),
+    InvalidBencodeValue,
+}
+
+impl Debug for MetaInfoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetaInfoError::InvalidAttribute(e) => {
+                write!(f, "InvalidAttribute: {:?} {:?}", e.content, e.attribute)
+            }
+            MetaInfoError::InvalidBencodeValue => write!(f, "InvalidBencodeValue"),
+        }
+    }
+}
+
 impl Metainfo {
-    pub fn new(bencode_value: BencodeValue) -> Result<Metainfo, String> {
+    pub fn new(bencode_value: BencodeValue) -> Result<Metainfo, MetaInfoError> {
         match bencode_value.clone() {
             BencodeValue::Dict(dict) => Metainfo::dict_to_metainfo(bencode_value, &dict),
-            _ => Err("Invalid metainfo".to_string()),
+            _ => Err(MetaInfoError::InvalidBencodeValue),
         }
     }
 
-    pub fn get_info_hash(&self) -> Result<Vec<u8>, String> {
+    pub fn get_info_hash(&self) -> Result<Vec<u8>, MetaInfoError> {
         let info = match self.torrent_content.get_value("info") {
             Some(info) => info,
-            None => return Err("info key not found".to_string()),
+            None => {
+                return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: self.torrent_content.clone(),
+                    attribute: "info".to_string(),
+                }))
+            }
         };
 
         let info_bencoded = info.encode();
@@ -77,22 +103,35 @@ impl Metainfo {
         Ok(result.to_vec())
     }
 
-    fn dict_to_base_info(dict: &BTreeMap<String, BencodeValue>) -> Result<BaseInfo, String> {
+    fn dict_to_base_info(dict: &BTreeMap<String, BencodeValue>) -> Result<BaseInfo, MetaInfoError> {
         let pieces = match dict.get("pieces") {
             Some(BencodeValue::String(BencodeString::Bytes(b))) => b.clone(),
-            _ => return Err("Invalid 'pieces' attribute".to_string()),
+            _ => {
+                return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: BencodeValue::Dict(dict.clone()),
+                    attribute: "pieces".to_string(),
+                }))
+            }
         };
 
         let piece_length = match dict.get("piece length") {
             Some(BencodeValue::Int(i)) => *i,
-            _ => return Err("Invalid 'piece length' attribute".to_string()),
+            _ => {
+                return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: BencodeValue::Dict(dict.clone()),
+                    attribute: "piece length".to_string(),
+                }))
+            }
         };
 
         let private = dict
             .get("private")
             .map(|v| match v {
                 BencodeValue::Int(i) => Ok(*i),
-                _ => Err("Invalid 'private' attribute".to_string()),
+                _ => Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: BencodeValue::Dict(dict.clone()),
+                    attribute: "private".to_string(),
+                })),
             })
             .transpose()?;
 
@@ -105,24 +144,37 @@ impl Metainfo {
 
     fn dict_to_single_file_info(
         dict: &BTreeMap<String, BencodeValue>,
-    ) -> Result<SingleFileInfo, String> {
+    ) -> Result<SingleFileInfo, MetaInfoError> {
         let base_info = Metainfo::dict_to_base_info(dict)?;
 
         let name = match dict.get("name") {
             Some(BencodeValue::String(BencodeString::String(s))) => s.clone(),
-            _ => return Err("Invalid 'name' attribute".to_string()),
+            _ => {
+                return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: BencodeValue::Dict(dict.clone()),
+                    attribute: "name".to_string(),
+                }))
+            }
         };
 
         let length = match dict.get("length") {
             Some(BencodeValue::Int(i)) => *i,
-            _ => return Err("Invalid 'length' attribute".to_string()),
+            _ => {
+                return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: BencodeValue::Dict(dict.clone()),
+                    attribute: "length".to_string(),
+                }))
+            }
         };
 
         let md5sum = dict
             .get("md5sum")
             .map(|v| match v {
                 BencodeValue::String(BencodeString::String(s)) => Ok(s.clone()),
-                _ => Err("Invalid 'md5sum' attribute".to_string()),
+                _ => Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: BencodeValue::Dict(dict.clone()),
+                    attribute: "md5sum".to_string(),
+                })),
             })
             .transpose()?;
 
@@ -134,64 +186,94 @@ impl Metainfo {
         })
     }
 
+    fn parse_file(file: &BencodeValue) -> Result<FileData, MetaInfoError> {
+        match file {
+            BencodeValue::Dict(file_dict) => {
+                let path = match file_dict.get("path") {
+                    Some(BencodeValue::List(path_list)) => path_list
+                        .iter()
+                        .map(|path_item| match path_item {
+                            BencodeValue::String(BencodeString::String(s)) => Ok(s.clone()),
+                            _ => {
+                                return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                                    content: BencodeValue::Dict(file_dict.clone()),
+                                    attribute: "path".to_string(),
+                                }))
+                            }
+                        })
+                        .collect::<Result<Vec<String>, MetaInfoError>>(),
+
+                    _ => {
+                        return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                            content: BencodeValue::Dict(file_dict.clone()),
+                            attribute: "path".to_string(),
+                        }))
+                    }
+                }?;
+
+                let length = match file_dict.get("length") {
+                    Some(BencodeValue::Int(i)) => *i,
+                    _ => {
+                        return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                            content: BencodeValue::Dict(file_dict.clone()),
+                            attribute: "length".to_string(),
+                        }))
+                    }
+                };
+
+                let md5sum = file_dict
+                    .get("md5sum")
+                    .map(|v| match v {
+                        BencodeValue::String(BencodeString::String(s)) => Ok(s.clone()),
+                        _ => Err(MetaInfoError::InvalidAttribute(AttributeError {
+                            content: BencodeValue::Dict(file_dict.clone()),
+                            attribute: "md5sum".to_string(),
+                        })),
+                    })
+                    .transpose()?;
+
+                Ok(FileData {
+                    path,
+                    length,
+                    md5sum,
+                })
+            }
+            _ => {
+                return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: file.clone(),
+                    attribute: "file".to_string(),
+                }))
+            }
+        }
+    }
+
     fn dict_to_multiple_file_info(
         dict: &BTreeMap<String, BencodeValue>,
-    ) -> Result<MultiFileInfo, String> {
+    ) -> Result<MultiFileInfo, MetaInfoError> {
         let base_info = Metainfo::dict_to_base_info(dict)?;
 
         let name = match dict.get("name") {
             Some(BencodeValue::String(BencodeString::String(s))) => s.clone(),
-            _ => return Err("Invalid 'name' attribute".to_string()),
+            _ => {
+                return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: BencodeValue::Dict(dict.clone()),
+                    attribute: "name".to_string(),
+                }))
+            }
         };
 
         let files = match dict.get("files") {
-            Some(BencodeValue::List(v)) => {
-                let mut result = Vec::new();
-                for item in v {
-                    match item {
-                        BencodeValue::Dict(file_dict) => {
-                            let path = match file_dict.get("path") {
-                                Some(BencodeValue::List(path_list)) => {
-                                    let mut result = Vec::new();
-                                    for path_item in path_list {
-                                        match path_item {
-                                            BencodeValue::String(BencodeString::String(s)) => {
-                                                result.push(s.clone());
-                                            }
-                                            _ => return Err("Invalid 'path' attribute".to_string()),
-                                        }
-                                    }
-                                    result
-                                }
-                                _ => return Err("Invalid 'path' attribute".to_string()),
-                            };
-
-                            let length = match file_dict.get("length") {
-                                Some(BencodeValue::Int(i)) => *i,
-                                _ => return Err("Invalid 'length' attribute".to_string()),
-                            };
-
-                            let md5sum = file_dict
-                                .get("md5sum")
-                                .map(|v| match v {
-                                    BencodeValue::String(BencodeString::String(s)) => Ok(s.clone()),
-                                    _ => Err("Invalid 'md5sum' attribute".to_string()),
-                                })
-                                .transpose()?;
-
-                            result.push(FileData {
-                                path,
-                                length,
-                                md5sum,
-                            });
-                        }
-                        _ => return Err("Invalid 'files' attribute".to_string()),
-                    }
-                }
-                result
+            Some(BencodeValue::List(v)) => v
+                .iter()
+                .map(Metainfo::parse_file)
+                .collect::<Result<Vec<FileData>, MetaInfoError>>(),
+            _ => {
+                return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: BencodeValue::Dict(dict.clone()),
+                    attribute: "files".to_string(),
+                }))
             }
-            _ => return Err("Invalid 'files' attribute".to_string()),
-        };
+        }?;
 
         Ok(MultiFileInfo {
             base_info,
@@ -200,7 +282,7 @@ impl Metainfo {
         })
     }
 
-    fn dict_to_info(dict: &BTreeMap<String, BencodeValue>) -> Result<Info, String> {
+    fn dict_to_info(dict: &BTreeMap<String, BencodeValue>) -> Result<Info, MetaInfoError> {
         match dict.get("files") {
             Some(BencodeValue::List(_)) => {
                 let info = Metainfo::dict_to_multiple_file_info(dict)?;
@@ -210,53 +292,80 @@ impl Metainfo {
                 let info = Metainfo::dict_to_single_file_info(dict)?;
                 Ok(Info::SingleFile(info))
             }
-            _ => Err("Invalid info".to_string()),
+            _ => Err(MetaInfoError::InvalidAttribute(AttributeError {
+                content: BencodeValue::Dict(dict.clone()),
+                attribute: "files".to_string(),
+            })),
         }
     }
 
-    fn convert_announce_list(value: &BencodeValue) -> Result<Vec<Vec<String>>, String> {
+    fn convert_announce_list(value: &BencodeValue) -> Result<Vec<Vec<String>>, MetaInfoError> {
         match value {
-            BencodeValue::List(list) => {
-                let mut result = Vec::new();
-                for item in list {
-                    match item {
-                        BencodeValue::List(inner_list) => {
-                            let mut inner_result = Vec::new();
-                            for inner_item in inner_list {
-                                match inner_item {
-                                    BencodeValue::String(BencodeString::String(s)) => {
-                                        inner_result.push(s.clone());
-                                    }
-                                    _ => return Err("Invalid announce list".to_string()),
+            BencodeValue::List(list) => list
+                .iter()
+                .map(|item| match item {
+                    BencodeValue::List(inner_list) => {
+                        let mut inner_result = Vec::new();
+                        for inner_item in inner_list {
+                            match inner_item {
+                                BencodeValue::String(BencodeString::String(s)) => {
+                                    inner_result.push(s.clone());
+                                }
+                                _ => {
+                                    return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                                        content: item.clone(),
+                                        attribute: "announce-list".to_string(),
+                                    }))
                                 }
                             }
-                            result.push(inner_result);
                         }
-                        _ => return Err("Invalid announce list".to_string()),
+                        Ok(inner_result)
                     }
-                }
-                Ok(result)
-            }
-            _ => Err("Invalid announce list".to_string()),
+                    _ => {
+                        return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                            content: item.clone(),
+                            attribute: "announce-list".to_string(),
+                        }))
+                    }
+                })
+                .collect::<Result<Vec<Vec<String>>, MetaInfoError>>(),
+            _ => Err(MetaInfoError::InvalidAttribute(AttributeError {
+                content: value.clone(),
+                attribute: "announce-list".to_string(),
+            })),
         }
     }
 
     fn dict_to_metainfo(
         bencode_value: BencodeValue,
         dict: &BTreeMap<String, BencodeValue>,
-    ) -> Result<Metainfo, String> {
+    ) -> Result<Metainfo, MetaInfoError> {
         let announce = match dict.get("announce") {
             Some(BencodeValue::String(BencodeString::String(s))) => s.clone(),
-            _ => return Err("Invalid 'announce' attribute".to_string()),
+            _ => {
+                return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: bencode_value.clone(),
+                    attribute: "announce".to_string(),
+                }))
+            }
         };
 
         let creation_date = dict
             .get("creation date")
             .map(|v| match v {
-                BencodeValue::Int(i) => DateTime::from_timestamp(*i, 0)
-                    .ok_or("Invalid 'creation date' attribute".to_string()),
+                BencodeValue::Int(i) => DateTime::from_timestamp(*i, 0).ok_or(
+                    MetaInfoError::InvalidAttribute(AttributeError {
+                        content: bencode_value.clone(),
+                        attribute: "creation date".to_string(),
+                    }),
+                ),
 
-                _ => return Err("Invalid 'creation date' attribute".to_string()),
+                _ => {
+                    return Err(MetaInfoError::InvalidAttribute(AttributeError {
+                        content: bencode_value.clone(),
+                        attribute: "creation date".to_string(),
+                    }))
+                }
             })
             .transpose()?;
 
@@ -264,7 +373,10 @@ impl Metainfo {
             .get("comment")
             .map(|v| match v {
                 BencodeValue::String(BencodeString::String(s)) => Ok(s.clone()),
-                _ => Err("Invalid 'comment' attribute"),
+                _ => Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: bencode_value.clone(),
+                    attribute: "comment".to_string(),
+                })),
             })
             .transpose()?;
 
@@ -272,7 +384,10 @@ impl Metainfo {
             .get("created by")
             .map(|v| match v {
                 BencodeValue::String(BencodeString::String(s)) => Ok(s.clone()),
-                _ => Err("Invalid 'created by' attribute"),
+                _ => Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: bencode_value.clone(),
+                    attribute: "created by".to_string(),
+                })),
             })
             .transpose()?;
 
@@ -280,13 +395,19 @@ impl Metainfo {
             .get("encoding")
             .map(|v| match v {
                 BencodeValue::String(BencodeString::String(s)) => Ok(s.clone()),
-                _ => Err("Invalid encoding"),
+                _ => Err(MetaInfoError::InvalidAttribute(AttributeError {
+                    content: bencode_value.clone(),
+                    attribute: "encoding".to_string(),
+                })),
             })
             .transpose()?;
 
         let info = match dict.get("info") {
             Some(BencodeValue::Dict(info_dict)) => Metainfo::dict_to_info(info_dict),
-            _ => Err("Invalid info".to_string()),
+            _ => Err(MetaInfoError::InvalidAttribute(AttributeError {
+                content: bencode_value.clone(),
+                attribute: "info".to_string(),
+            })),
         }?;
 
         let announce_list = dict
