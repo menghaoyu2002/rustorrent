@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt::{Debug, Display},
     io::{Read, Write},
     net::TcpStream,
@@ -63,14 +64,14 @@ impl Debug for ClientError {
 
 pub struct Client {
     tracker: Tracker,
-    connections: Vec<TcpStream>,
+    connections: HashMap<Vec<u8>, TcpStream>,
 }
 
 impl Client {
     pub fn new(tracker: Tracker) -> Self {
         Self {
             tracker,
-            connections: Vec::new(),
+            connections: HashMap::new(),
         }
     }
 
@@ -95,7 +96,7 @@ impl Client {
         Ok(handshake)
     }
 
-    fn validate_handshake(handshake: &[u8], info_hash: &Vec<u8>) -> Result<String, ClientError> {
+    fn validate_handshake(handshake: &[u8], info_hash: &Vec<u8>) -> Result<Vec<u8>, ClientError> {
         if handshake.len() != HANDSHAKE_LEN {
             return Err(ClientError::ValidateHandshakeError(
                 "Invalid handshake length".to_string(),
@@ -121,12 +122,7 @@ impl Client {
             ));
         }
 
-        let peer_id = String::from_utf8(handshake[48..68].to_vec()).map_err(|_| {
-            ClientError::ValidateHandshakeError(String::from(format!(
-                "Invalid peer id: {:?}",
-                String::from_utf8(handshake[48..68].to_vec())
-            )))
-        })?;
+        let peer_id = handshake[48..68].to_vec();
 
         Ok(peer_id)
     }
@@ -196,13 +192,14 @@ impl Client {
                 {
                     Ok((peer_id, stream)) => {
                         println!(
-                            "Connected to peer {} with id {}",
-                            stream.peer_addr().map_err(|_| {
-                                ClientError::GetPeersError(String::from("Failed to get peer addr"))
-                            })?,
-                            peer_id
+                            "Connected to peer: {} at {}",
+                            String::from_utf8_lossy(&peer_id),
+                            stream
+                                .peer_addr()
+                                .map(|addr| addr.to_string())
+                                .unwrap_or("Unknown".to_string())
                         );
-                        self.connections.push(stream);
+                        self.connections.insert(peer_id, stream);
                     }
                     Err(e) => {
                         eprintln!("{:?}", e);
