@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
-use super::{BencodeString, BencodeValue};
+use super::{BencodeString, BencodeValue, ParseError};
 
-fn parse_string(input: &Vec<u8>) -> Result<(BencodeString, Vec<u8>), String> {
+fn parse_string(input: &Vec<u8>) -> Result<(BencodeString, Vec<u8>), ParseError> {
     let mut length = 0;
     let mut i = 0;
     while let Some(char) = input.get(i) {
@@ -13,20 +13,20 @@ fn parse_string(input: &Vec<u8>) -> Result<(BencodeString, Vec<u8>), String> {
         if char.is_ascii_digit() {
             length = length * 10 + (char - b'0') as usize;
         } else {
-            return Err(format!(
-                "Invalid Bencode String '{}'",
-                String::from_utf8_lossy(input)
-            ));
+            return Err(ParseError {
+                value: String::from_utf8_lossy(input).to_string(),
+                message: String::from("Invalid Bencode String length"),
+            });
         }
 
         i += 1;
     }
 
     if i + 1 + length > input.len() {
-        return Err(format!(
-            "Invalid Bencode String '{}': Length exceeds input length",
-            String::from_utf8_lossy(input)
-        ));
+        return Err(ParseError {
+            value: String::from_utf8_lossy(input).to_string(),
+            message: "Length exceeds input length".to_string(),
+        });
     }
 
     let str_segment = &input[i + 1..i + 1 + length];
@@ -38,12 +38,12 @@ fn parse_string(input: &Vec<u8>) -> Result<(BencodeString, Vec<u8>), String> {
     Ok((str, input[i + 1 + length..].to_vec()))
 }
 
-fn parse_int(input: &Vec<u8>) -> Result<(i64, Vec<u8>), String> {
+fn parse_int(input: &Vec<u8>) -> Result<(i64, Vec<u8>), ParseError> {
     if input.get(0) != Some(&b'i') {
-        return Err(format!(
-            "Invalid Bencode Integer '{}'",
-            String::from_utf8_lossy(input)
-        ));
+        return Err(ParseError {
+            value: String::from_utf8_lossy(input).to_string(),
+            message: String::from("Bencode Integer must start with 'i'"),
+        });
     }
 
     let mut i = 1;
@@ -63,33 +63,32 @@ fn parse_int(input: &Vec<u8>) -> Result<(i64, Vec<u8>), String> {
         }
 
         if starts_with_zero && i != starting_index {
-            return Err(format!(
-                "Invalid Bencode Integer '{}', cannot be prefixed with 0",
-                String::from_utf8_lossy(input)
-            ));
+            return Err(ParseError {
+                value: String::from_utf8_lossy(input).to_string(),
+                message: "Integer cannot be prefixed with 0".to_string(),
+            });
         }
 
         if *char == b'0' && i == starting_index {
+            if is_negative {
+                return Err(ParseError {
+                    value: String::from_utf8_lossy(input).to_string(),
+                    message: "Invalid Bencode Integer".to_string(),
+                });
+            }
             starts_with_zero = true;
         }
 
         if char.is_ascii_digit() {
             int = int * 10 + (*char - b'0') as i64;
         } else {
-            return Err(format!(
-                "Could not parse Bencode integer '{}'",
-                String::from_utf8_lossy(input)
-            ));
+            return Err(ParseError {
+                value: String::from_utf8_lossy(input).to_string(),
+                message: "Could not parse Bencode Integer".to_string(),
+            });
         }
 
         i += 1;
-    }
-
-    if is_negative && int == 0 {
-        return Err(format!(
-            "Invalid Bencode Integer '{}'",
-            String::from_utf8_lossy(input)
-        ));
     }
 
     if is_negative {
@@ -99,12 +98,12 @@ fn parse_int(input: &Vec<u8>) -> Result<(i64, Vec<u8>), String> {
     Ok((int, input[i + 1..].to_vec()))
 }
 
-fn parse_list(input: &Vec<u8>) -> Result<(Vec<BencodeValue>, Vec<u8>), String> {
+fn parse_list(input: &Vec<u8>) -> Result<(Vec<BencodeValue>, Vec<u8>), ParseError> {
     if input.get(0) != Some(&b'l') {
-        return Err(format!(
-            "Invalid Bencode List '{}'",
-            String::from_utf8_lossy(input)
-        ));
+        return Err(ParseError {
+            value: String::from_utf8_lossy(input).to_string(),
+            message: String::from("Bencode List must start with 'l'"),
+        });
     }
 
     let mut rest = input[1..].to_vec();
@@ -119,18 +118,18 @@ fn parse_list(input: &Vec<u8>) -> Result<(Vec<BencodeValue>, Vec<u8>), String> {
         list.push(value);
     }
 
-    Err(format!(
-        "Invalid Bencode List '{}'",
-        String::from_utf8_lossy(input)
-    ))
+    Err(ParseError {
+        value: String::from_utf8_lossy(input).to_string(),
+        message: "Invalid Bencode List".to_string(),
+    })
 }
 
-fn parse_dict(input: &Vec<u8>) -> Result<(BTreeMap<String, BencodeValue>, Vec<u8>), String> {
+fn parse_dict(input: &Vec<u8>) -> Result<(BTreeMap<String, BencodeValue>, Vec<u8>), ParseError> {
     if input.get(0) != Some(&b'd') {
-        return Err(format!(
-            "Invalid Bencode Dict '{}'",
-            String::from_utf8_lossy(input)
-        ));
+        return Err(ParseError {
+            value: String::from_utf8_lossy(input).to_string(),
+            message: String::from("Bencode Dict must start with 'd'"),
+        });
     }
 
     let mut rest = input[1..].to_vec();
@@ -150,13 +149,13 @@ fn parse_dict(input: &Vec<u8>) -> Result<(BTreeMap<String, BencodeValue>, Vec<u8
         rest = updated_rest;
     }
 
-    Err(format!(
-        "Invalid Bencode Dict '{}'",
-        String::from_utf8_lossy(input)
-    ))
+    Err(ParseError {
+        value: String::from_utf8_lossy(input).to_string(),
+        message: "Invalid Bencode Dict".to_string(),
+    })
 }
 
-pub fn parse_bencode(input: &Vec<u8>) -> Result<(BencodeValue, Vec<u8>), String> {
+pub fn parse_bencode(input: &Vec<u8>) -> Result<(BencodeValue, Vec<u8>), ParseError> {
     match input.get(0) {
         Some(char) => match char {
             b'i' => {
@@ -177,10 +176,10 @@ pub fn parse_bencode(input: &Vec<u8>) -> Result<(BencodeValue, Vec<u8>), String>
             }
         },
         None => {
-            return Err(format!(
-                "Invalid Bencode Value '{}'",
-                String::from_utf8_lossy(input)
-            ))
+            return Err(ParseError {
+                value: String::from_utf8_lossy(input).to_string(),
+                message: String::from("Invalid Bencode Value"),
+            })
         }
     }
 }
@@ -192,6 +191,7 @@ mod tests {
     fn to_byte_vec(s: &str) -> Vec<u8> {
         s.bytes().collect::<Vec<u8>>()
     }
+
     #[test]
     fn test_parse_string() {
         assert_eq!(
@@ -211,11 +211,17 @@ mod tests {
         );
 
         assert_eq!(
-            Err("Invalid Bencode String 'invalid'".to_string()),
+            Err(ParseError {
+                value: "invalid".to_string(),
+                message: String::from("Invalid Bencode String length"),
+            }),
             parse_string(&to_byte_vec("invalid"))
         );
         assert_eq!(
-            Err("Invalid Bencode String 'invalid:invalid'".to_string()),
+            Err(ParseError {
+                value: "invalid:invalid".to_string(),
+                message: String::from("Invalid Bencode String length"),
+            }),
             parse_string(&to_byte_vec("invalid:invalid"))
         );
 
@@ -237,19 +243,31 @@ mod tests {
         );
 
         assert_eq!(
-            Err("Invalid Bencode Integer 'i02e', cannot be prefixed with 0".to_string()),
+            Err(ParseError {
+                value: "i02e".to_string(),
+                message: "Integer cannot be prefixed with 0".to_string()
+            }),
             parse_int(&to_byte_vec("i02e"))
         );
         assert_eq!(
-            Err("Invalid Bencode Integer 'i-0e'".to_string()),
+            Err(ParseError {
+                value: "i-0e".to_string(),
+                message: "Invalid Bencode Integer".to_string()
+            }),
             parse_int(&to_byte_vec("i-0e"))
         );
         assert_eq!(
-            Err("Invalid Bencode Integer 'i-02e', cannot be prefixed with 0".to_string()),
+            Err(ParseError {
+                value: "i-02e".to_string(),
+                message: "Invalid Bencode Integer".to_string()
+            }),
             parse_int(&to_byte_vec("i-02e"))
         );
         assert_eq!(
-            Err("Could not parse Bencode integer 'iinvalide'".to_string()),
+            Err(ParseError {
+                value: "iinvalide".to_string(),
+                message: "Could not parse Bencode Integer".to_string()
+            }),
             parse_int(&to_byte_vec("iinvalide"))
         );
     }
@@ -304,11 +322,17 @@ mod tests {
         );
 
         assert_eq!(
-            Err("Invalid Bencode List 'invalid'".to_string()),
+            Err(ParseError {
+                value: "invalid".to_string(),
+                message: "Bencode List must start with 'l'".to_string()
+            }),
             parse_list(&to_byte_vec("invalid"))
         );
         assert_eq!(
-            Err("Invalid Bencode List 'l'".to_string()),
+            Err(ParseError {
+                value: "l".to_string(),
+                message: "Invalid Bencode List".to_string()
+            }),
             parse_list(&to_byte_vec("l"))
         );
     }
@@ -351,11 +375,17 @@ mod tests {
         );
 
         assert_eq!(
-            Err("Invalid Bencode Dict 'invalid'".to_string()),
+            Err(ParseError {
+                value: "invalid".to_string(),
+                message: "Bencode Dict must start with 'd'".to_string()
+            }),
             parse_dict(&to_byte_vec("invalid"))
         );
         assert_eq!(
-            Err("Invalid Bencode Dict 'd'".to_string()),
+            Err(ParseError {
+                value: "d".to_string(),
+                message: "Invalid Bencode Dict".to_string()
+            }),
             parse_dict(&to_byte_vec("d"))
         );
     }

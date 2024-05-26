@@ -91,9 +91,9 @@ impl Client {
                                 }
                             }
 
-                            if self.validate_handshake(&handshake).is_err() {
-                                return Err(format!("Invalid handshake from peer {}", peer.addr));
-                            }
+                            // if self.validate_handshake(&handshake).is_err() {
+                            //     return Err(format!("Invalid handshake from peer {}", peer.addr));
+                            // }
 
                             let mut buf = [0u8; HANDSHAKE_LEN];
                             match stream.read_exact(&mut buf) {

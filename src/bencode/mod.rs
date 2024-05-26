@@ -6,6 +6,12 @@ mod encoder;
 mod parser;
 
 #[derive(Debug, PartialEq)]
+pub struct ParseError {
+    pub value: String,
+    pub message: String,
+}
+
+#[derive(Debug, PartialEq)]
 pub enum BencodeString {
     String(String),
     Bytes(Vec<u8>),
@@ -326,7 +332,7 @@ impl BencodeValue {
         encoder::encode_bencode(self)
     }
 
-    pub fn parse(data: &Vec<u8>) -> Result<(BencodeValue, Vec<u8>), String> {
+    pub fn parse(data: &Vec<u8>) -> Result<(BencodeValue, Vec<u8>), ParseError> {
         parser::parse_bencode(data)
     }
 
