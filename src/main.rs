@@ -43,5 +43,8 @@ async fn main() {
         return;
     };
 
-    client.connect_to_peers(1).await.unwrap();
+    client
+        .connect_to_peers(1)
+        .await
+        .expect("Failed to connect to peers");
 }

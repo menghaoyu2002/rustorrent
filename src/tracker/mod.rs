@@ -5,7 +5,25 @@ use std::{
 
 use rand::Rng;
 
-use crate::bencode::{BencodeString, BencodeValue, Metainfo};
+use crate::{
+    bencode::{BencodeString, BencodeValue},
+    metainfo::Metainfo,
+};
+
+pub struct InvalidResponseError {
+    pub url: String,
+    pub status: reqwest::StatusCode,
+    pub message: String,
+}
+
+pub enum TrackerError {
+    InvalidMetainfo,
+    InvalidInfoHash,
+    GetPeersFailure(String),
+    GetAccounceError(String),
+    InvalidResponse(InvalidResponseError),
+    ResponseParseError(String),
+}
 
 #[derive(Debug)]
 pub struct Tracker {
@@ -60,14 +78,13 @@ impl Tracker {
         self.peer_id.to_string()
     }
 
-    pub async fn get_peers(&self) -> Result<Peers, String> {
+    pub async fn get_peers(&self) -> Result<Peers, TrackerError> {
         let response = self.get_announce().await?;
         let peers = match response {
             TrackerResponse::Success(success_response) => success_response.peers,
             TrackerResponse::Failure(failure_response) => {
-                return Err(format!(
-                    "Tracker failure: {}",
-                    failure_response.failure_reason
+                return Err(TrackerError::GetPeersFailure(
+                    failure_response.failure_reason,
                 ))
             }
         };
@@ -75,7 +92,7 @@ impl Tracker {
         Ok(peers)
     }
 
-    fn parse_peers(value: &BencodeValue) -> Result<Peers, String> {
+    fn parse_peers(value: &BencodeValue) -> Result<Peers, TrackerError> {
         match value {
             BencodeValue::String(BencodeString::Bytes(raw_peers)) => {
                 let mut peers = Vec::new();
@@ -98,12 +115,20 @@ impl Tracker {
                         BencodeValue::Dict(dict) => {
                             let ip = match dict.get("ip") {
                                 Some(BencodeValue::String(BencodeString::String(ip))) => ip.clone(),
-                                _ => return Err("ip key not found".to_string()),
+                                _ => {
+                                    return Err(TrackerError::GetPeersFailure(
+                                        "ip key not found".to_string(),
+                                    ))
+                                }
                             };
 
                             let port = match dict.get("port") {
                                 Some(BencodeValue::Int(port)) => *port,
-                                _ => return Err("port key not found".to_string()),
+                                _ => {
+                                    return Err(TrackerError::GetPeersFailure(
+                                        "port key not found".to_string(),
+                                    ))
+                                }
                             };
 
                             let peer_id = dict
@@ -119,33 +144,47 @@ impl Tracker {
                             parsed_peers.push(Peer {
                                 peer_id,
                                 addr: SocketAddr::new(
-                                    IpAddr::from_str(&ip).map_err(|_| "unable to parse ip")?,
+                                    IpAddr::from_str(&ip).map_err(|e| {
+                                        TrackerError::GetPeersFailure(e.to_string())
+                                    })?,
                                     port as u16,
                                 ),
                             });
                         }
-                        _ => return Err("invalid peers".to_string()),
+                        _ => {
+                            return Err(TrackerError::GetPeersFailure("invalid peers".to_string()))
+                        }
                     }
                 }
                 return Ok(parsed_peers);
             }
-            _ => return Err("invalid peers".to_string()),
+            _ => return Err(TrackerError::GetPeersFailure("invalid peers".to_string())),
         }
     }
 
-    fn parse_success_response(value: &BencodeValue) -> Result<TrackerSuccessResponse, String> {
+    fn parse_success_response(
+        value: &BencodeValue,
+    ) -> Result<TrackerSuccessResponse, TrackerError> {
         let interval = match value.get_value("interval") {
             Some(interval) => match interval {
                 BencodeValue::Int(interval) => *interval,
                 _ => unreachable!(),
             },
-            None => return Err("interval key not found".to_string()),
+            None => {
+                return Err(TrackerError::ResponseParseError(
+                    "interval key not found".to_string(),
+                ))
+            }
         };
 
         let min_interval = match value.get_value("min interval") {
             Some(min_interval) => match min_interval {
                 BencodeValue::Int(min_interval) => Some(*min_interval),
-                _ => return Err("min interval key not found".to_string()),
+                _ => {
+                    return Err(TrackerError::ResponseParseError(
+                        "min interval key not found".to_string(),
+                    ))
+                }
             },
             None => None,
         };
@@ -153,7 +192,11 @@ impl Tracker {
         let tracker_id = match value.get_value("tracker id") {
             Some(tracker_id) => match tracker_id {
                 BencodeValue::String(BencodeString::String(tracker_id)) => Some(tracker_id.clone()),
-                _ => return Err("tracker id key not found".to_string()),
+                _ => {
+                    return Err(TrackerError::ResponseParseError(
+                        "tracker id key not found".to_string(),
+                    ))
+                }
             },
             None => None,
         };
@@ -161,21 +204,39 @@ impl Tracker {
         let complete = match value.get_value("complete") {
             Some(complete) => match complete {
                 BencodeValue::Int(complete) => *complete,
-                _ => return Err("complete key not found".to_string()),
+                _ => {
+                    return Err(TrackerError::ResponseParseError(
+                        "complete key not found".to_string(),
+                    ))
+                }
             },
-            None => return Err("complete key not found".to_string()),
+            None => {
+                return Err(TrackerError::ResponseParseError(
+                    "complete key not found".to_string(),
+                ))
+            }
         };
 
         let incomplete = match value.get_value("incomplete") {
             Some(incomplete) => match incomplete {
                 BencodeValue::Int(incomplete) => *incomplete,
-                _ => return Err("incomplete key not found".to_string()),
+                _ => {
+                    return Err(TrackerError::ResponseParseError(
+                        "incomplete key not found".to_string(),
+                    ))
+                }
             },
-            None => return Err("incomplete key not found".to_string()),
+            None => {
+                return Err(TrackerError::ResponseParseError(
+                    "incomplete key not found".to_string(),
+                ))
+            }
         };
 
         let Some(Ok(peers)) = value.get_value("peers").map(Tracker::parse_peers) else {
-            return Err("peers key not found".to_string());
+            return Err(TrackerError::ResponseParseError(
+                "peers key not found".to_string(),
+            ));
         };
 
         Ok(TrackerSuccessResponse {
@@ -188,7 +249,7 @@ impl Tracker {
         })
     }
 
-    fn to_tracker_response(parsed_value: &BencodeValue) -> Result<TrackerResponse, String> {
+    fn to_tracker_response(parsed_value: &BencodeValue) -> Result<TrackerResponse, TrackerError> {
         let failure_response = parsed_value.get_value("failure reason").map(|value| {
             let failure_reason = match value {
                 BencodeValue::String(BencodeString::String(reason)) => reason.clone(),
@@ -207,7 +268,7 @@ impl Tracker {
         Ok(TrackerResponse::Success(success_response))
     }
 
-    pub async fn get_announce(&self) -> Result<TrackerResponse, String> {
+    pub async fn get_announce(&self) -> Result<TrackerResponse, TrackerError> {
         let mut url = String::from(&self.metainfo.announce);
 
         let info_hash = self
@@ -223,16 +284,28 @@ impl Tracker {
         url.push_str("&port=6881");
 
         println!("GET {}", &url);
-        let response = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+        let response = reqwest::get(&url)
+            .await
+            .map_err(|e| TrackerError::GetAccounceError(e.to_string()))?;
         println!("GET {}", response.status());
 
         let bytes = response
             .bytes()
             .await
-            .map_err(|_| String::from("unable to parse response body"))?
+            .map_err(|e| {
+                TrackerError::InvalidResponse(InvalidResponseError {
+                    url,
+                    status: e
+                        .status()
+                        .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+                    message: e.to_string(),
+                })
+            })?
             .to_vec();
 
-        let (parsed_bencode, _) = BencodeValue::parse(&bytes).expect("Error parsing response");
+        let (parsed_bencode, _) =
+            BencodeValue::parse(&bytes).map_err(|e| TrackerError::ResponseParseError(e.message))?;
+
         Tracker::to_tracker_response(&parsed_bencode)
     }
 
