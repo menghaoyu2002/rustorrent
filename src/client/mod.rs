@@ -38,6 +38,34 @@ impl Client {
         Ok(handshake)
     }
 
+    fn validate_handshake(&self, handshake: &[u8]) -> Result<String, String> {
+        if handshake.len() != HANDSHAKE_LEN {
+            return Err("Invalid handshake length".to_string());
+        }
+
+        let pstr_len = handshake[0] as usize;
+        if pstr_len != b"BitTorrent protocol".len() {
+            return Err("Invalid protocol string length".to_string());
+        }
+
+        if &handshake[1..20] != b"BitTorrent protocol" {
+            return Err("Invalid protocol string".to_string());
+        }
+
+        if &handshake[20..28] != [0u8; 8] {
+            return Err("Invalid reserved bytes".to_string());
+        }
+
+        let info_hash = self.tracker.get_metainfo().get_info_hash()?;
+        if &handshake[28..48] != info_hash {
+            return Err("Invalid info hash".to_string());
+        }
+
+        let peer_id = String::from_utf8(handshake[48..68].to_vec()).map_err(|e| e.to_string())?;
+
+        Ok(peer_id)
+    }
+
     pub async fn connect_to_peers(&mut self, min_connections: usize) -> Result<(), String> {
         while self.connections.len() < min_connections {
             let mut handles = Vec::new();
@@ -63,14 +91,14 @@ impl Client {
                                 }
                             }
 
+                            if self.validate_handshake(&handshake).is_err() {
+                                return Err(format!("Invalid handshake from peer {}", peer.addr));
+                            }
+
                             let mut buf = [0u8; HANDSHAKE_LEN];
                             match stream.read_exact(&mut buf) {
                                 Ok(()) => {
-                                    println!(
-                                        "Received handshake from peer {} {:#?}",
-                                        peer.addr,
-                                        String::from_utf8_lossy(&buf)
-                                    );
+                                    println!("Received handshake from peer {}", peer.addr,);
                                 }
                                 Err(_) => {
                                     return Err(format!(
