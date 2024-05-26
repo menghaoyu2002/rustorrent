@@ -9,8 +9,8 @@ use crate::bencode::{BencodeString, BencodeValue, Metainfo};
 
 #[derive(Debug)]
 pub struct Tracker {
-    pub metainfo: Metainfo,
-    pub peer_id: String,
+    metainfo: Metainfo,
+    peer_id: String,
 }
 
 #[derive(Debug)]
@@ -50,6 +50,14 @@ impl Tracker {
             metainfo,
             peer_id: Tracker::get_peer_id(),
         }
+    }
+
+    pub fn get_metainfo(&self) -> &Metainfo {
+        &self.metainfo
+    }
+
+    pub fn peer_id(&self) -> String {
+        self.peer_id.to_string()
     }
 
     pub async fn get_peers(&self) -> Result<Peers, String> {
@@ -206,7 +214,11 @@ impl Tracker {
             .metainfo
             .get_info_hash()
             .expect("Error getting info hash");
-        url.push_str(format!("?info_hash={}", info_hash).as_str());
+
+        let url_encoded_info_hash =
+            url::form_urlencoded::byte_serialize(&info_hash).collect::<String>();
+
+        url.push_str(format!("?info_hash={}", url_encoded_info_hash).as_str());
         url.push_str(format!("&peer_id={}", self.peer_id).as_str());
         url.push_str("&port=6881");
 

@@ -43,5 +43,5 @@ async fn main() {
         return;
     };
 
-    client.connect_to_peers(30).await.unwrap();
+    client.connect_to_peers(1).await.unwrap();
 }

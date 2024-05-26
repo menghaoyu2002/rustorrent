@@ -76,7 +76,7 @@ impl Metainfo {
         }
     }
 
-    pub fn get_info_hash(&self) -> Result<String, String> {
+    pub fn get_info_hash(&self) -> Result<Vec<u8>, String> {
         let info = match self.torrent_content.get_value("info") {
             Some(info) => info,
             None => return Err("info key not found".to_string()),
@@ -87,9 +87,8 @@ impl Metainfo {
         let mut hasher = Sha1::new();
         hasher.update(info_bencoded);
         let result = hasher.finalize();
-        let info_hash = url::form_urlencoded::byte_serialize(&result).collect::<String>();
 
-        Ok(info_hash)
+        Ok(result.to_vec())
     }
 
     fn dict_to_base_info(dict: &BTreeMap<String, BencodeValue>) -> Result<BaseInfo, String> {
