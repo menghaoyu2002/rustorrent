@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fmt::{Debug, Display},
+    fmt::Display,
     io::{Read, Write},
     net::TcpStream,
     time::Duration,
@@ -10,6 +10,7 @@ use crate::tracker::{Peer, Tracker};
 
 const PSTR: &[u8; 19] = b"BitTorrent protocol";
 const HANDSHAKE_LEN: usize = 49 + PSTR.len();
+const REQUEST_LEN: u32 = 2 << 14;
 
 pub struct PeerConnectionError {
     pub peer: Peer,
@@ -18,6 +19,36 @@ pub struct PeerConnectionError {
 pub enum HandshakePhase {
     Send,
     Receive,
+}
+
+pub enum MessageId {
+    Choke = 0,
+    Unchoke = 1,
+    Interested = 2,
+    NotInterested = 3,
+    Have = 4,
+    Bitfield = 5,
+    Request = 6,
+    Piece = 7,
+    Cancel = 8,
+    Port = 9,
+}
+
+impl MessageId {
+    fn value(&self) -> u8 {
+        match self {
+            MessageId::Choke => 0,
+            MessageId::Unchoke => 1,
+            MessageId::Interested => 2,
+            MessageId::NotInterested => 3,
+            MessageId::Have => 4,
+            MessageId::Bitfield => 5,
+            MessageId::Request => 6,
+            MessageId::Piece => 7,
+            MessageId::Cancel => 8,
+            MessageId::Port => 9,
+        }
+    }
 }
 
 impl Display for HandshakePhase {
@@ -36,13 +67,20 @@ pub struct HandshakeError {
     message: String,
 }
 
+pub struct SendMessageError {
+    peer: Peer,
+    message: Message,
+    error: String,
+}
+
 pub enum ClientError {
     ValidateHandshakeError(String),
     GetPeersError(String),
     HandshakeError(HandshakeError),
+    SendMessageError(SendMessageError),
 }
 
-impl Debug for ClientError {
+impl Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientError::ValidateHandshakeError(e) => write!(f, "ValidateHandshakeError: {}", e),
@@ -58,6 +96,47 @@ impl Debug for ClientError {
                     .map(|b| format!("{:02x}", b))
                     .collect::<String>()
             ),
+            ClientError::SendMessageError(e) => write!(
+                f,
+                "SendMessageError: Peer: {}, Message: {:02x?}, Error: {}",
+                e.peer,
+                e.message.serialize(),
+                e.error
+            ),
+        }
+    }
+}
+
+struct Message {
+    len: u32,
+    id: u8,
+    payload: Vec<u8>,
+}
+
+impl Message {
+    fn new(id: MessageId, payload: &Vec<u8>) -> Self {
+        Self {
+            len: payload.len() as u32 + 1,
+            id: id.value(),
+            payload: payload.clone(),
+        }
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        let mut message = Vec::new();
+        message.extend_from_slice(&self.len.to_be_bytes());
+        message.push(self.id);
+        message.extend_from_slice(&self.payload);
+        message
+    }
+}
+
+impl Clone for Message {
+    fn clone(&self) -> Self {
+        Self {
+            len: self.len,
+            id: self.id,
+            payload: self.payload.clone(),
         }
     }
 }
@@ -65,14 +144,51 @@ impl Debug for ClientError {
 pub struct Client {
     tracker: Tracker,
     connections: HashMap<Vec<u8>, TcpStream>,
+    bitfield: Vec<u8>,
 }
 
 impl Client {
     pub fn new(tracker: Tracker) -> Self {
+        // divide the number of pieces by 8 to get the number of bytes needed to represent the bitfield
+        let bitfield = vec![0u8; tracker.get_metainfo().get_peices().len().div_ceil(8)];
         Self {
             tracker,
             connections: HashMap::new(),
+            bitfield,
         }
+    }
+
+    pub async fn download(&mut self) -> Result<(), ClientError> {
+        println!("Starting download...");
+        // self.connect_to_peers(30).await?;
+        self.connect_to_peers(1).await?;
+        self.send_message(Message::new(MessageId::Bitfield, &self.bitfield))?;
+        self.send_message(Message::new(MessageId::Interested, &Vec::new()))?;
+        Ok(())
+    }
+
+    fn send_message(&mut self, message: Message) -> Result<(), ClientError> {
+        let serialized_message = message.serialize();
+        println!("Sending message: {:?}", serialized_message);
+        for (_, stream) in self.connections.iter_mut() {
+            stream.write_all(&serialized_message).map_err(|e| {
+                ClientError::SendMessageError(SendMessageError {
+                    peer: Peer {
+                        peer_id: None,
+                        addr: stream.peer_addr().unwrap(),
+                    },
+                    message: message.clone(),
+                    error: e.to_string(),
+                })
+            })?;
+
+            let mut response = vec![0u8; serialized_message.len()];
+            stream.read_exact(&mut response).map_err(|e| {
+                ClientError::GetPeersError(format!("Failed to read response: {}", e))
+            })?;
+            println!("Response: {:?}", response);
+        }
+        Ok(())
     }
 
     fn get_handshake(&self) -> Result<Vec<u8>, ClientError> {
@@ -90,8 +206,9 @@ impl Client {
         handshake.extend_from_slice(PSTR);
         handshake.extend_from_slice(&[0; 8]);
         handshake.extend_from_slice(&info_hash);
-        handshake.extend_from_slice(peer_id.as_bytes());
+        handshake.extend_from_slice(&peer_id);
 
+        #[cfg(debug_assertions)]
         assert_eq!(handshake.len(), HANDSHAKE_LEN);
         Ok(handshake)
     }
@@ -127,7 +244,8 @@ impl Client {
         Ok(peer_id)
     }
 
-    pub async fn connect_to_peers(&mut self, min_connections: usize) -> Result<(), ClientError> {
+    async fn connect_to_peers(&mut self, min_connections: usize) -> Result<(), ClientError> {
+        println!("Connecting to peers...");
         while self.connections.len() < min_connections {
             let mut handles = Vec::new();
             for peer in self
@@ -137,7 +255,7 @@ impl Client {
                 .map_err(|_| ClientError::GetPeersError(String::from("Failed to get peers")))?
             {
                 if self.connections.len() >= min_connections {
-                    break;
+                    return Ok(());
                 }
 
                 let handshake = self.get_handshake()?;
@@ -183,26 +301,27 @@ impl Client {
 
             for handle in handles {
                 if self.connections.len() >= min_connections {
-                    break;
-                }
-
-                match handle
-                    .await
-                    .map_err(|e| ClientError::GetPeersError(String::from(e.to_string())))?
-                {
-                    Ok((peer_id, stream)) => {
-                        println!(
-                            "Connected to peer: {} at {}",
-                            String::from_utf8_lossy(&peer_id),
-                            stream
-                                .peer_addr()
-                                .map(|addr| addr.to_string())
-                                .unwrap_or("Unknown".to_string())
-                        );
-                        self.connections.insert(peer_id, stream);
-                    }
-                    Err(e) => {
-                        eprintln!("{:?}", e);
+                    handle.abort();
+                } else {
+                    match handle
+                        .await
+                        .map_err(|e| ClientError::GetPeersError(String::from(e.to_string())))?
+                    {
+                        Ok((peer_id, stream)) => {
+                            println!(
+                                "Connected to peer: {} at {}",
+                                String::from_utf8_lossy(&peer_id),
+                                stream
+                                    .peer_addr()
+                                    .map(|addr| addr.to_string())
+                                    .unwrap_or("Unknown".to_string())
+                            );
+                            self.connections.insert(peer_id, stream);
+                        }
+                        Err(e) => {
+                            #[cfg(debug_assertions)]
+                            eprintln!("{}", e);
+                        }
                     }
                 }
             }

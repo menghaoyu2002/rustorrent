@@ -52,13 +52,13 @@ impl Debug for TrackerError {
 #[derive(Debug)]
 pub struct Tracker {
     metainfo: Metainfo,
-    peer_id: String,
+    peer_id: Vec<u8>,
 }
 
 #[derive(Debug)]
 pub struct Peer {
     pub addr: SocketAddr,
-    pub peer_id: Option<String>,
+    pub peer_id: Option<Vec<u8>>,
 }
 
 impl Clone for Peer {
@@ -73,7 +73,7 @@ impl Clone for Peer {
 impl Display for Peer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.peer_id {
-            Some(peer_id) => write!(f, "{}: {}", peer_id, self.addr),
+            Some(peer_id) => write!(f, "{}: {}", String::from_utf8_lossy(peer_id), self.addr),
             None => write!(f, "{}", self.addr),
         }
     }
@@ -116,8 +116,8 @@ impl Tracker {
         &self.metainfo
     }
 
-    pub fn peer_id(&self) -> String {
-        self.peer_id.to_string()
+    pub fn peer_id(&self) -> Vec<u8> {
+        self.peer_id.clone()
     }
 
     pub async fn get_peers(&self) -> Result<Peers, TrackerError> {
@@ -177,6 +177,9 @@ impl Tracker {
                                 .get("peer id")
                                 .map(|peer_id| match peer_id {
                                     BencodeValue::String(BencodeString::String(peer_id)) => {
+                                        Some(peer_id.bytes().collect::<Vec<u8>>())
+                                    }
+                                    BencodeValue::String(BencodeString::Bytes(peer_id)) => {
                                         Some(peer_id.clone())
                                     }
                                     _ => None,
@@ -322,7 +325,13 @@ impl Tracker {
             url::form_urlencoded::byte_serialize(&info_hash).collect::<String>();
 
         url.push_str(format!("?info_hash={}", url_encoded_info_hash).as_str());
-        url.push_str(format!("&peer_id={}", self.peer_id).as_str());
+        url.push_str(
+            format!(
+                "&peer_id={}",
+                String::from_utf8(self.peer_id.clone()).unwrap()
+            )
+            .as_str(),
+        );
         url.push_str("&port=6881");
 
         println!("GET {}", &url);
@@ -351,11 +360,11 @@ impl Tracker {
         Tracker::to_tracker_response(&parsed_bencode)
     }
 
-    fn get_peer_id() -> String {
-        let mut peer_id = String::from("-RT0001-");
+    fn get_peer_id() -> Vec<u8> {
+        let mut peer_id = Vec::from(b"-rT0001-");
         let mut rng = rand::thread_rng();
         for _ in 0..(20 - peer_id.len()) {
-            let random_char = (rng.gen_range(0..26) + 97) as u8 as char;
+            let random_char = (rng.gen_range(0..26) + 97) as u8;
             peer_id.push(random_char);
         }
         peer_id

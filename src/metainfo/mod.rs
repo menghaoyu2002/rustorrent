@@ -8,7 +8,7 @@ use crate::bencode::{BencodeString, BencodeValue};
 #[derive(Debug, PartialEq)]
 pub struct BaseInfo {
     // shared by both single and multi file mode
-    pub pieces: Vec<u8>,
+    pub pieces: Vec<Vec<u8>>,
     pub piece_length: i64,
     pub private: Option<i64>,
 }
@@ -103,9 +103,22 @@ impl Metainfo {
         Ok(result.to_vec())
     }
 
+    pub fn get_peices(&self) -> &Vec<Vec<u8>> {
+        match self.info {
+            Info::SingleFile(ref info) => &info.base_info.pieces,
+            Info::MultiFile(ref info) => &info.base_info.pieces,
+        }
+    }
+
     fn dict_to_base_info(dict: &BTreeMap<String, BencodeValue>) -> Result<BaseInfo, MetaInfoError> {
         let pieces = match dict.get("pieces") {
-            Some(BencodeValue::String(BencodeString::Bytes(b))) => b.clone(),
+            Some(BencodeValue::String(BencodeString::Bytes(b))) => {
+                let mut pieces = Vec::new();
+                for i in (0..b.len()).step_by(20) {
+                    pieces.push(b[i..i + 20].to_vec());
+                }
+                pieces
+            }
             _ => {
                 return Err(MetaInfoError::InvalidAttribute(AttributeError {
                     content: BencodeValue::Dict(dict.clone()),

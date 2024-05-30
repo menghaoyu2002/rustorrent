@@ -40,8 +40,8 @@ async fn main() {
     let tracker = Tracker::new(bencode_value).expect("Failed to create tracker");
     let mut client = Client::new(tracker);
 
-    client
-        .connect_to_peers(10)
-        .await
-        .expect("Failed to connect to peers");
+    match client.download().await {
+        Ok(()) => println!("Download completed"),
+        Err(e) => eprintln!("Error downloading: {}", e),
+    }
 }
