@@ -7,7 +7,11 @@ use tokio::{
     time::timeout,
 };
 
+mod bitfield;
+
 use crate::tracker::{Peer, Tracker};
+
+use self::bitfield::Bitfield;
 
 const PSTR: &[u8; 19] = b"BitTorrent protocol";
 const HANDSHAKE_LEN: usize = 49 + PSTR.len();
@@ -69,7 +73,7 @@ pub struct HandshakeError {
 }
 
 pub struct SendMessageError {
-    peer: Peer,
+    peer_id: Vec<u8>,
     message: Message,
     error: String,
 }
@@ -100,7 +104,7 @@ impl Display for ClientError {
             ClientError::SendMessageError(e) => write!(
                 f,
                 "SendMessageError: Peer: {}, Message: {:02x?}, Error: {}",
-                e.peer,
+                String::from_utf8_lossy(&e.peer_id),
                 e.message.serialize(),
                 e.error
             ),
@@ -145,7 +149,7 @@ impl Clone for Message {
 struct PeerState {
     peer_id: Vec<u8>,
     connection: TcpStream,
-    bitfield: Vec<bool>,
+    bitfield: Bitfield,
 
     am_choking: bool,
     am_interested: bool,
@@ -156,13 +160,12 @@ struct PeerState {
 pub struct Client {
     tracker: Tracker,
     peers: HashMap<Vec<u8>, PeerState>,
-    bitfield: Vec<bool>,
+    bitfield: Bitfield,
 }
 
 impl Client {
     pub fn new(tracker: Tracker) -> Self {
-        // divide the number of pieces by 8 to get the number of bytes needed to represent the bitfield
-        let bitfield = vec![false; tracker.get_metainfo().get_peices().len().div_ceil(8)];
+        let bitfield = Bitfield::new(tracker.get_metainfo().get_peices().len());
         Self {
             tracker,
             peers: HashMap::new(),
@@ -173,6 +176,80 @@ impl Client {
     pub async fn download(&mut self) -> Result<(), ClientError> {
         self.connect_to_peers(30).await?;
         Ok(())
+    }
+
+    async fn initialize_bitfields(&mut self, peer_id: &Vec<u8>) -> Result<(), ClientError> {
+        self.send_message(
+            peer_id,
+            Message::new(MessageId::Bitfield, &self.bitfield.to_bytes()),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn send_message(
+        &mut self,
+        peer_id: &Vec<u8>,
+        message: Message,
+    ) -> Result<(), ClientError> {
+        let peer = self.peers.get_mut(peer_id).ok_or_else(|| {
+            ClientError::SendMessageError(SendMessageError {
+                peer_id: peer_id.clone(),
+                message: message.clone(),
+                error: "Peer not found".to_string(),
+            })
+        })?;
+
+        peer.connection
+            .write_all(&message.serialize())
+            .await
+            .map_err(|e| {
+                ClientError::SendMessageError(SendMessageError {
+                    peer_id: peer_id.clone(),
+                    message: message.clone(),
+                    error: format!("Failed to send message: {}", e),
+                })
+            })?;
+
+        Ok(())
+    }
+
+    async fn receive_message(&mut self, peer_id: &Vec<u8>) -> Result<Message, ClientError> {
+        let peer = self.peers.get_mut(peer_id).ok_or_else(|| {
+            ClientError::SendMessageError(SendMessageError {
+                peer_id: peer_id.clone(),
+                message: Message::new(MessageId::Choke, &Vec::new()),
+                error: "Peer not found".to_string(),
+            })
+        })?;
+
+        let mut len = [0u8; 4];
+        peer.connection.read_exact(&mut len).await.map_err(|e| {
+            ClientError::SendMessageError(SendMessageError {
+                peer_id: peer_id.clone(),
+                message: Message::new(MessageId::Choke, &Vec::new()),
+                error: format!("Failed to read message length: {}", e),
+            })
+        })?;
+
+        let len = u32::from_be_bytes(len);
+        let mut message = vec![0u8; len as usize];
+        peer.connection
+            .read_exact(&mut message)
+            .await
+            .map_err(|e| {
+                ClientError::SendMessageError(SendMessageError {
+                    peer_id: peer_id.clone(),
+                    message: Message::new(MessageId::Choke, &Vec::new()),
+                    error: format!("Failed to read message: {}", e),
+                })
+            })?;
+
+        let id = message[0];
+        let payload = message[1..].to_vec();
+
+        Ok(Message { len, id, payload })
     }
 
     fn get_handshake(&self) -> Result<Vec<u8>, ClientError> {
@@ -322,10 +399,9 @@ impl Client {
                             PeerState {
                                 peer_id,
                                 connection: stream,
-                                bitfield: vec![
-                                    false;
-                                    self.tracker.get_metainfo().get_peices().len()
-                                ],
+                                bitfield: Bitfield::new(
+                                    self.tracker.get_metainfo().get_peices().len(),
+                                ),
                                 am_choking: true,
                                 am_interested: false,
                                 peer_choking: true,
