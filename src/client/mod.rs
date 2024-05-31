@@ -92,7 +92,7 @@ impl Display for ClientError {
 struct PeerState {
     peer_id: Vec<u8>,
     connection: TcpStream,
-    bitfield: Bitfield,
+    bitfield: Option<Bitfield>,
 
     am_choking: bool,
     am_interested: bool,
@@ -217,8 +217,6 @@ impl Client {
                 let info_hash = self.tracker.get_metainfo().get_info_hash().map_err(|_| {
                     ClientError::GetPeersError(String::from("Failed to get info hash"))
                 })?;
-                let bitfield = self.bitfield.to_bytes();
-                let bitfield_len = self.bitfield.len();
 
                 handles.spawn(async move {
                     let mut stream = match timeout(
@@ -246,28 +244,7 @@ impl Client {
                         Self::initiate_handshake(&mut stream, &handshake, &info_hash, &peer)
                             .await?;
 
-                    send_message(&mut stream, Message::new(MessageId::Bitfield, &bitfield))
-                        .await
-                        .map_err(|e| ClientError::SendMessageError((peer_id.clone(), e)))?;
-                    let message = receive_message(&mut stream)
-                        .await
-                        .map_err(|e| ClientError::SendMessageError((peer_id.clone(), e)))?;
-
-                    let bitfield = match message.get_id() {
-                        Ok(MessageId::Bitfield) => {
-                            assert_eq!(message.get_payload().len(), bitfield_len.div_ceil(8));
-                            Bitfield::from_bytes(message.get_payload(), bitfield_len)
-                        }
-                        _ => {
-                            return Err(ClientError::ReceiveMessageError((
-                                peer_id.clone(),
-                                Some(message),
-                                "Expected bitfield message".to_string(),
-                            )))
-                        }
-                    };
-
-                    Ok((peer_id, stream, bitfield))
+                    Ok((peer_id, stream))
                 });
             }
 
@@ -276,7 +253,7 @@ impl Client {
                     handle.map_err(|e| ClientError::GetPeersError(format!("{}", e)))?;
 
                 match conection_result {
-                    Ok((peer_id, stream, bitfield)) => {
+                    Ok((peer_id, stream)) => {
                         println!(
                             "Connected to peer: {:?}",
                             stream.peer_addr().map_err(|e| {
@@ -291,7 +268,7 @@ impl Client {
                             PeerState {
                                 peer_id,
                                 connection: stream,
-                                bitfield,
+                                bitfield: None,
                                 am_choking: true,
                                 am_interested: false,
                                 peer_choking: true,
