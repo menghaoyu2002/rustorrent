@@ -67,6 +67,23 @@ impl Bitfield {
         }
         bytes
     }
+
+    pub fn from_bytes(bytes: &[u8], len: usize) -> Self {
+        let mut bitfield = Bitfield::new(len);
+        for (i, &byte) in bytes.iter().enumerate() {
+            for j in 0..8 {
+                if i * 8 + j >= len {
+                    break;
+                }
+                // coolio: right shift the byte to get the desired bit to the rightmost position
+                // then bitwise AND with 1 to get *only* the bit value removing leading bits
+                // then check if that bit is set
+                let bit = (byte >> (7 - j)) & 1 == 1;
+                bitfield.set(i * 8 + j, bit).unwrap();
+            }
+        }
+        bitfield
+    }
 }
 
 #[cfg(test)]
@@ -128,5 +145,21 @@ mod tests {
 
         let bytes = bitfield.to_bytes();
         assert_eq!(bytes, vec![0b11101110, 0b11000000]);
+    }
+
+    #[test]
+    fn test_from_bytes() {
+        let bytes = vec![0b11101110, 0b11000000];
+        let bitfield = Bitfield::from_bytes(&bytes, 10);
+        assert_eq!(bitfield.is_set(0).unwrap(), true);
+        assert_eq!(bitfield.is_set(1).unwrap(), true);
+        assert_eq!(bitfield.is_set(2).unwrap(), true);
+        assert_eq!(bitfield.is_set(3).unwrap(), false);
+        assert_eq!(bitfield.is_set(4).unwrap(), true);
+        assert_eq!(bitfield.is_set(5).unwrap(), true);
+        assert_eq!(bitfield.is_set(6).unwrap(), true);
+        assert_eq!(bitfield.is_set(7).unwrap(), false);
+        assert_eq!(bitfield.is_set(8).unwrap(), true);
+        assert_eq!(bitfield.is_set(9).unwrap(), true);
     }
 }
