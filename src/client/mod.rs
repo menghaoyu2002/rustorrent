@@ -1,9 +1,16 @@
-use std::{collections::HashMap, fmt::Display, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt::Display,
+    sync::Arc,
+    time::Duration,
+};
 
+use futures::future::join_all;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    task::JoinSet,
+    sync::{Mutex, RwLock},
+    task::{yield_now, JoinHandle, JoinSet},
     time::timeout,
 };
 
@@ -55,6 +62,7 @@ pub enum ClientError {
     HandshakeError(HandshakeError),
     SendMessageError((Vec<u8>, SendMessageError)),
     ReceiveMessageError((Vec<u8>, Option<Message>, String)),
+    ProcessMessagesError(String),
 }
 
 impl Display for ClientError {
@@ -85,14 +93,17 @@ impl Display for ClientError {
                     e.2
                 )
             }
+            ClientError::ProcessMessagesError(e) => write!(f, "ProcessMessagesError: {}", e),
         }
     }
 }
 
 struct PeerState {
     peer_id: Vec<u8>,
-    connection: TcpStream,
+    stream: Arc<Mutex<TcpStream>>,
     bitfield: Option<Bitfield>,
+    send_queue: Arc<Mutex<VecDeque<(Vec<u8>, Message)>>>,
+    receive_queue: Arc<Mutex<VecDeque<(Vec<u8>, Message)>>>,
 
     am_choking: bool,
     am_interested: bool,
@@ -100,9 +111,25 @@ struct PeerState {
     peer_interested: bool,
 }
 
+impl PeerState {
+    pub fn new(peer_id: &Vec<u8>, stream: TcpStream) -> Self {
+        Self {
+            peer_id: peer_id.clone(),
+            stream: Arc::new(Mutex::new(stream)),
+            send_queue: Arc::new(Mutex::new(VecDeque::new())),
+            receive_queue: Arc::new(Mutex::new(VecDeque::new())),
+            bitfield: None,
+            am_choking: true,
+            am_interested: false,
+            peer_choking: true,
+            peer_interested: false,
+        }
+    }
+}
+
 pub struct Client {
     tracker: Tracker,
-    peers: HashMap<Vec<u8>, PeerState>,
+    peers: Arc<RwLock<HashMap<Vec<u8>, PeerState>>>,
     bitfield: Bitfield,
 }
 
@@ -111,14 +138,97 @@ impl Client {
         let bitfield = Bitfield::new(tracker.get_metainfo().get_peices().len());
         Self {
             tracker,
-            peers: HashMap::new(),
+            peers: Arc::new(RwLock::new(HashMap::new())),
             bitfield,
         }
     }
 
     pub async fn download(&mut self) -> Result<(), ClientError> {
-        self.connect_to_peers(30).await?;
+        let peer_ids = self.connect_to_peers(8).await?;
+
+        let mut handles = Vec::new();
+        peer_ids.iter().for_each(|id| {
+            handles.push(self.send_messages(id));
+            handles.push(self.retrieve_messages(id));
+        });
+
+        join_all(handles).await;
+
         Ok(())
+    }
+
+    fn retrieve_messages(&self, peer_id: &Vec<u8>) -> JoinHandle<()> {
+        let peers = Arc::clone(&self.peers);
+        let id = peer_id.clone();
+
+        tokio::spawn(async move {
+            let id_to_peer = peers.read().await;
+            let peer = id_to_peer.get(&id).unwrap();
+            loop {
+                let mut stream = peer.stream.lock().await;
+                let Ok(message) = receive_message(&mut stream).await else {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "Failed to receive message from peer: {}",
+                        String::from_utf8_lossy(&id)
+                    );
+                    peers.write().await.remove(&id);
+                    break;
+                };
+
+                println!(
+                    "Received \"{}\" message from peer: {}",
+                    &message.get_id(),
+                    String::from_utf8_lossy(&id)
+                );
+
+                peer.receive_queue
+                    .lock()
+                    .await
+                    .push_back((peer.peer_id.clone(), message));
+            }
+        })
+    }
+
+    fn send_messages(&self, peer_id: &Vec<u8>) -> JoinHandle<()> {
+        let peers = Arc::clone(&self.peers);
+        let id = peer_id.clone();
+
+        tokio::spawn(async move {
+            let id_to_peer = peers.read().await;
+            let peer = id_to_peer.get(&id).unwrap();
+            loop {
+                let Some((peer_id, message)) = peer.send_queue.lock().await.pop_front() else {
+                    yield_now().await;
+                    continue;
+                };
+
+                println!(
+                    "Sending message {} to peer: {}",
+                    message.get_id(),
+                    String::from_utf8_lossy(&peer_id)
+                );
+                let id_to_peer = peers.read().await;
+                let Some(peer) = id_to_peer.get(&peer_id) else {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "Failed to get peer with id: {:?}",
+                        String::from_utf8_lossy(&peer_id)
+                    );
+                    break;
+                };
+
+                let mut stream = peer.stream.lock().await;
+                if let Err(e) = send_message(&mut stream, message).await {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "Failed to send message to peer {:?}: {}",
+                        String::from_utf8_lossy(&peer_id),
+                        e.to_string()
+                    );
+                }
+            }
+        })
     }
 
     fn get_handshake(&self) -> Result<Vec<u8>, ClientError> {
@@ -202,10 +312,13 @@ impl Client {
         Self::validate_handshake(&response, info_hash)
     }
 
-    async fn connect_to_peers(&mut self, min_connections: usize) -> Result<(), ClientError> {
+    async fn connect_to_peers(
+        &mut self,
+        min_connections: usize,
+    ) -> Result<Vec<Vec<u8>>, ClientError> {
         println!("Connecting to peers...");
-
-        while self.peers.len() < min_connections {
+        let mut new_peers = Vec::new();
+        while self.peers.read().await.len() < min_connections {
             let mut handles = JoinSet::new();
             for peer in self
                 .tracker
@@ -217,6 +330,9 @@ impl Client {
                 let info_hash = self.tracker.get_metainfo().get_info_hash().map_err(|_| {
                     ClientError::GetPeersError(String::from("Failed to get info hash"))
                 })?;
+                let bitfield = self.bitfield.to_bytes();
+
+                let peers = Arc::clone(&mut self.peers);
 
                 handles.spawn(async move {
                     let mut stream = match timeout(
@@ -244,7 +360,22 @@ impl Client {
                         Self::initiate_handshake(&mut stream, &handshake, &info_hash, &peer)
                             .await?;
 
-                    Ok((peer_id, stream))
+                    if peers.read().await.len() >= min_connections {
+                        return Err(ClientError::GetPeersError(String::from(
+                            "Already connected to minimum number of peers",
+                        )));
+                    }
+
+                    let peer_state = PeerState::new(&peer_id, stream);
+                    peer_state.send_queue.lock().await.push_back((
+                        peer_id.clone(),
+                        Message::new(MessageId::Bitfield, &bitfield),
+                    ));
+                    peers.write().await.insert(peer_id.clone(), peer_state);
+
+                    println!("Connected to peer: {:?}", peer.addr);
+
+                    Ok(peer_id)
                 });
             }
 
@@ -253,38 +384,19 @@ impl Client {
                     handle.map_err(|e| ClientError::GetPeersError(format!("{}", e)))?;
 
                 match conection_result {
-                    Ok((peer_id, stream)) => {
-                        println!(
-                            "Connected to peer: {:?}",
-                            stream.peer_addr().map_err(|e| {
-                                ClientError::GetPeersError(format!(
-                                    "Failed to get peer address: {}",
-                                    e
-                                ))
-                            })?
-                        );
-                        self.peers.insert(
-                            peer_id.clone(),
-                            PeerState {
-                                peer_id,
-                                connection: stream,
-                                bitfield: None,
-                                am_choking: true,
-                                am_interested: false,
-                                peer_choking: true,
-                                peer_interested: false,
-                            },
-                        );
+                    Ok(peer_id) => {
+                        new_peers.push(peer_id);
+                        // self.retrieve_messages(&peer_id);
                     }
                     Err(e) => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("{}", e);
+                        // #[cfg(debug_assertions)]
+                        // eprintln!("{}", e);
                     }
                 }
             }
         }
 
-        println!("Connected to {} peers", self.peers.len());
-        Ok(())
+        println!("Connected to {} new peers", new_peers.len());
+        Ok(new_peers)
     }
 }

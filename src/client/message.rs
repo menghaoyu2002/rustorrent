@@ -16,16 +16,7 @@ pub enum MessageId {
     Piece = 7,
     Cancel = 8,
     Port = 9,
-}
-
-pub struct InvalidMessageIdError {
-    id: u8,
-}
-
-impl Display for InvalidMessageIdError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Invalid message id: {}", self.id)
-    }
+    KeepAlive = 10,
 }
 
 impl MessageId {
@@ -41,22 +32,24 @@ impl MessageId {
             MessageId::Piece => 7,
             MessageId::Cancel => 8,
             MessageId::Port => 9,
+            MessageId::KeepAlive => 10,
         }
     }
 
-    pub fn from_value(id: u8) -> Result<MessageId, InvalidMessageIdError> {
+    pub fn from_value(id: u8) -> MessageId {
         match id {
-            0 => Ok(MessageId::Choke),
-            1 => Ok(MessageId::Unchoke),
-            2 => Ok(MessageId::Interested),
-            3 => Ok(MessageId::NotInterested),
-            4 => Ok(MessageId::Have),
-            5 => Ok(MessageId::Bitfield),
-            6 => Ok(MessageId::Request),
-            7 => Ok(MessageId::Piece),
-            8 => Ok(MessageId::Cancel),
-            9 => Ok(MessageId::Port),
-            _ => Err(InvalidMessageIdError { id }),
+            0 => MessageId::Choke,
+            1 => MessageId::Unchoke,
+            2 => MessageId::Interested,
+            3 => MessageId::NotInterested,
+            4 => MessageId::Have,
+            5 => MessageId::Bitfield,
+            6 => MessageId::Request,
+            7 => MessageId::Piece,
+            8 => MessageId::Cancel,
+            9 => MessageId::Port,
+            10 => MessageId::KeepAlive,
+            _ => unreachable!("unhandled message id value: {}", id),
         }
     }
 }
@@ -64,6 +57,7 @@ impl MessageId {
 impl Display for MessageId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            MessageId::KeepAlive => write!(f, "KeepAlive"),
             MessageId::Choke => write!(f, "Choke"),
             MessageId::Unchoke => write!(f, "Unchoke"),
             MessageId::Interested => write!(f, "Interested"),
@@ -78,6 +72,7 @@ impl Display for MessageId {
     }
 }
 
+#[derive(Debug)]
 pub struct SendMessageError {
     message: Message,
     error: String,
@@ -93,6 +88,7 @@ impl Display for SendMessageError {
     }
 }
 
+#[derive(Debug)]
 pub struct Message {
     len: u32,
     id: u8,
@@ -108,7 +104,7 @@ impl Message {
         }
     }
 
-    pub fn get_id(&self) -> Result<MessageId, InvalidMessageIdError> {
+    pub fn get_id(&self) -> MessageId {
         MessageId::from_value(self.id)
     }
 
@@ -149,6 +145,7 @@ pub async fn send_message(
     stream: &mut TcpStream,
     message: Message,
 ) -> Result<(), SendMessageError> {
+    stream.writable().await.unwrap();
     stream
         .write_all(&message.serialize())
         .await
@@ -171,7 +168,16 @@ pub async fn receive_message(stream: &mut TcpStream) -> Result<Message, SendMess
         })?;
 
     let len = u32::from_be_bytes(len);
+    if len == 0 {
+        return Ok(Message {
+            len,
+            id: MessageId::KeepAlive.value(),
+            payload: Vec::new(),
+        });
+    }
+
     let mut message = vec![0u8; len as usize];
+    stream.readable().await.unwrap();
     stream
         .read_exact(&mut message)
         .await
