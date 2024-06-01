@@ -2,9 +2,12 @@ use std::{
     fmt::{Debug, Display},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
+    time::Duration,
 };
 
+use chrono::{DateTime, Utc};
 use rand::Rng;
+use tokio::time::sleep;
 
 use crate::{
     bencode::{BencodeString, BencodeValue},
@@ -27,6 +30,7 @@ impl Debug for InvalidResponseError {
     }
 }
 
+#[derive(Debug)]
 pub enum TrackerError {
     InvalidMetainfo,
     InvalidInfoHash,
@@ -36,7 +40,7 @@ pub enum TrackerError {
     ResponseParseError(String),
 }
 
-impl Debug for TrackerError {
+impl Display for TrackerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TrackerError::InvalidMetainfo => write!(f, "InvalidMetainfo"),
@@ -53,6 +57,9 @@ impl Debug for TrackerError {
 pub struct Tracker {
     metainfo: Metainfo,
     peer_id: Vec<u8>,
+
+    last_announce: Option<DateTime<Utc>>,
+    last_interval: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -109,6 +116,8 @@ impl Tracker {
         Ok(Self {
             metainfo,
             peer_id: Tracker::get_peer_id(),
+            last_announce: None,
+            last_interval: None,
         })
     }
 
@@ -120,16 +129,33 @@ impl Tracker {
         self.peer_id.clone()
     }
 
-    pub async fn get_peers(&self) -> Result<Peers, TrackerError> {
+    pub async fn get_peers(&mut self) -> Result<Peers, TrackerError> {
+        // if let Some(last_announce) = self.last_announce {
+        //     if let Some(last_interval) = self.last_interval {
+        //         let elapsed = Utc::now()
+        //             .signed_duration_since(last_announce)
+        //             .num_seconds();
+        //         println!("{}, {}", last_interval, elapsed);
+        //         if elapsed < last_interval {
+        //             sleep(Duration::from_secs((last_interval - elapsed) as u64)).await;
+        //         }
+        //     }
+        // }
+
         let response = self.get_announce().await?;
         let peers = match response {
-            TrackerResponse::Success(success_response) => success_response.peers,
+            TrackerResponse::Success(success_response) => {
+                self.last_interval = Some(success_response.interval);
+                success_response.peers
+            }
             TrackerResponse::Failure(failure_response) => {
                 return Err(TrackerError::GetPeersFailure(
                     failure_response.failure_reason,
                 ))
             }
         };
+
+        self.last_announce = Some(Utc::now());
 
         Ok(peers)
     }
@@ -333,6 +359,7 @@ impl Tracker {
             .as_str(),
         );
         url.push_str("&port=6881");
+        url.push_str("&numwant=100");
 
         println!("GET {}", &url);
         let response = reqwest::get(&url)
