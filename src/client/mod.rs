@@ -147,7 +147,7 @@ impl Client {
     }
 
     pub async fn download(&mut self) -> Result<(), ClientError> {
-        self.connect_to_peers(10).await?;
+        self.connect_to_peers(30).await?;
 
         let _ = tokio::join!(
             self.send_messages(),
@@ -165,7 +165,7 @@ impl Client {
         tokio::spawn(async move {
             loop {
                 for (peer_id, peer) in peers.read().await.iter() {
-                    if (Utc::now() - peer.read().await.last_sent).num_seconds() > 40 {
+                    if (Utc::now() - peer.read().await.last_sent).num_seconds() > 60 {
                         println!(
                             "Sending keep alive to peer: {:?}",
                             String::from_utf8_lossy(peer_id)
@@ -176,8 +176,6 @@ impl Client {
                         ));
                     }
                 }
-
-                yield_now().await;
             }
         })
     }
@@ -189,11 +187,7 @@ impl Client {
             let mut peers_to_remove = Vec::new();
             loop {
                 for (peer_id, peer) in peers.read().await.iter() {
-                    let stream = &mut peer.write().await.stream;
-                    // println!(
-                    //     "Receiving message from peer: {:?}",
-                    //     String::from_utf8_lossy(peer_id)
-                    // );
+                    let stream = &peer.read().await.stream;
 
                     match receive_message(stream).await {
                         Ok(message) => {
@@ -250,7 +244,7 @@ impl Client {
                         continue;
                     };
 
-                    let stream = &mut peer.write().await.stream;
+                    let stream = &peer.read().await.stream;
                     println!(
                         "Sending \"{}\" message from {}",
                         message.get_id(),
@@ -438,8 +432,8 @@ impl Client {
                     handle.map_err(|e| ClientError::GetPeersError(format!("{}", e)))?;
 
                 if let Err(e) = conection_result {
-                    // #[cfg(debug_assertions)]
-                    // eprintln!("{}", e);
+                    #[cfg(debug_assertions)]
+                    eprintln!("{}", e);
                 }
                 // println!("{}", handles.len())
             }

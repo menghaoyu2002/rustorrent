@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use tokio::{io::AsyncReadExt, net::TcpStream};
+use tokio::{io::AsyncReadExt, net::TcpStream, task::yield_now};
 
 pub enum MessageId {
     Choke = 0,
@@ -172,7 +172,7 @@ impl Display for Message {
     }
 }
 
-pub async fn send_message(stream: &mut TcpStream, message: &Message) -> Result<(), SendError> {
+pub async fn send_message(stream: &TcpStream, message: &Message) -> Result<(), SendError> {
     let mut bytes_written = 0;
     while bytes_written < message.serialize().len() {
         stream.writable().await.unwrap();
@@ -200,7 +200,7 @@ pub async fn send_message(stream: &mut TcpStream, message: &Message) -> Result<(
     Ok(())
 }
 
-pub async fn receive_message(stream: &mut TcpStream) -> Result<Message, ReceiveError> {
+pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError> {
     let mut len = [0u8; 4];
 
     let mut bytes_read = 0;
@@ -235,13 +235,28 @@ pub async fn receive_message(stream: &mut TcpStream) -> Result<Message, ReceiveE
     }
 
     let mut message = vec![0u8; len as usize];
-    stream.readable().await.unwrap();
-    stream.read_exact(&mut message).await.map_err(|e| {
-        ReceiveError::ReceiveError(ReceiveMessageError {
-            error: format!("Failed to read message: {}", e),
-        })
-    })?;
-
+    let mut bytes_read = 0;
+    while bytes_read < len as usize {
+        stream.readable().await.unwrap();
+        match stream.try_read(&mut message) {
+            Ok(0) => {
+                return Err(ReceiveError::ReceiveError(ReceiveMessageError {
+                    error: "stream was closed".to_string(),
+                }))
+            }
+            Ok(n) => {
+                bytes_read += n;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                yield_now().await;
+            }
+            Err(e) => {
+                return Err(ReceiveError::ReceiveError(ReceiveMessageError {
+                    error: format!("Failed to read message: {}", e),
+                }));
+            }
+        }
+    }
     let id = message[0];
     let payload = message[1..].to_vec();
 
