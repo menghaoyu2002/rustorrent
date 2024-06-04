@@ -102,7 +102,7 @@ struct PeerState {
     peer_id: Vec<u8>,
     stream: TcpStream,
     bitfield: Option<Bitfield>,
-    last_sent: DateTime<Utc>,
+    last_touch: DateTime<Utc>,
 
     am_choking: bool,
     am_interested: bool,
@@ -115,7 +115,7 @@ impl PeerState {
         Self {
             peer_id: peer_id.clone(),
             stream,
-            last_sent: Utc::now(),
+            last_touch: Utc::now(),
 
             bitfield: None,
             am_choking: true,
@@ -153,10 +153,87 @@ impl Client {
             self.send_messages(),
             self.retrieve_messages(),
             self.keep_alive(),
-            // self.process_messages(),
+            self.process_messages(),
         );
 
         Ok(())
+    }
+
+    fn process_messages(&self) -> JoinHandle<()> {
+        let peers = Arc::clone(&self.peers);
+        let receive_queue = Arc::clone(&self.receive_queue);
+        let bitfield_len = self.bitfield.len();
+        tokio::spawn(async move {
+            loop {
+                let Some((peer_id, message)) = receive_queue.lock().await.pop_front() else {
+                    continue;
+                };
+
+                let mut should_remove = false;
+
+                {
+                    let id_to_peer = peers.read().await;
+                    let Some(peer) = id_to_peer.get(&peer_id) else {
+                        continue;
+                    };
+
+                    println!(
+                        "Processing \"{}\" message from {}",
+                        message.get_id(),
+                        String::from_utf8_lossy(&peer_id)
+                    );
+
+                    match message.get_id() {
+                        MessageId::Choke => {
+                            peer.write().await.peer_choking = true;
+                        }
+                        MessageId::Unchoke => {
+                            peer.write().await.peer_choking = false;
+                        }
+                        MessageId::Interested => {
+                            peer.write().await.peer_interested = true;
+                        }
+                        MessageId::NotInterested => {
+                            peer.write().await.peer_interested = false;
+                        }
+                        MessageId::Have => {
+                            let payload = message.get_payload();
+                            let piece_index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
+                            if peer.write().await.bitfield.is_none() {
+                                peer.write().await.bitfield = Some(Bitfield::new(bitfield_len));
+                            };
+
+                            should_remove = peer
+                                .write()
+                                .await
+                                .bitfield
+                                .as_mut()
+                                .unwrap()
+                                .set(piece_index as usize, true)
+                                .is_err();
+                        }
+                        MessageId::Bitfield => {
+                            let payload = message.get_payload();
+                            if payload.len() * 8 < bitfield_len {
+                                should_remove = true;
+                            } else {
+                                let bitfield = Bitfield::from_bytes(payload, bitfield_len);
+                                peer.write().await.bitfield = Some(bitfield);
+                            }
+                        }
+                        MessageId::Request => {}
+                        MessageId::Piece => {}
+                        MessageId::Cancel => {}
+                        MessageId::KeepAlive => {}
+                        MessageId::Port => {}
+                    }
+                }
+
+                if should_remove {
+                    peers.write().await.remove(&peer_id);
+                }
+            }
+        })
     }
 
     fn keep_alive(&self) -> JoinHandle<()> {
@@ -165,11 +242,7 @@ impl Client {
         tokio::spawn(async move {
             loop {
                 for (peer_id, peer) in peers.read().await.iter() {
-                    if (Utc::now() - peer.read().await.last_sent).num_seconds() > 60 {
-                        println!(
-                            "Sending keep alive to peer: {:?}",
-                            String::from_utf8_lossy(peer_id)
-                        );
+                    if (Utc::now() - peer.read().await.last_touch).num_seconds() > 60 {
                         send_queue.lock().await.push_back((
                             peer_id.clone(),
                             Message::new(MessageId::KeepAlive, &Vec::new()),
@@ -187,32 +260,35 @@ impl Client {
             let mut peers_to_remove = Vec::new();
             loop {
                 for (peer_id, peer) in peers.read().await.iter() {
-                    let stream = &peer.read().await.stream;
-
-                    match receive_message(stream).await {
-                        Ok(message) => {
-                            println!(
-                                "Received \"{}\" message from {}",
-                                message.get_id(),
-                                String::from_utf8_lossy(peer_id)
-                            );
-                            receive_queue
-                                .lock()
-                                .await
-                                .push_back((peer_id.clone(), message));
-                        }
-                        Err(ReceiveError::WouldBlock) => {
-                            continue;
-                        }
-                        Err(e) => {
-                            println!(
-                                "Failed to receive message from peer {:?}: {}",
-                                String::from_utf8_lossy(peer_id),
-                                e.to_string()
-                            );
-                            peers_to_remove.push(peer_id.clone());
+                    {
+                        let stream = &peer.read().await.stream;
+                        match receive_message(stream).await {
+                            Ok(message) => {
+                                println!(
+                                    "Received \"{}\" message from {}",
+                                    message.get_id(),
+                                    String::from_utf8_lossy(peer_id)
+                                );
+                                receive_queue
+                                    .lock()
+                                    .await
+                                    .push_back((peer_id.clone(), message));
+                            }
+                            Err(ReceiveError::WouldBlock) => {
+                                continue;
+                            }
+                            Err(e) => {
+                                println!(
+                                    "Failed to receive message from peer {:?}: {}",
+                                    String::from_utf8_lossy(peer_id),
+                                    e.to_string()
+                                );
+                                peers_to_remove.push(peer_id.clone());
+                            }
                         }
                     }
+
+                    peer.write().await.last_touch = Utc::now();
                 }
 
                 for peer_id in &peers_to_remove {
@@ -257,7 +333,7 @@ impl Client {
                     Ok(()) => {
                         let id_to_peer = peers.read().await;
                         let mut peer = id_to_peer.get(&peer_id).unwrap().write().await;
-                        peer.last_sent = Utc::now();
+                        peer.last_touch = Utc::now();
                     }
                     Err(SendError::WouldBlock) => {
                         send_queue.lock().await.push_back((peer_id, message));
@@ -432,10 +508,9 @@ impl Client {
                     handle.map_err(|e| ClientError::GetPeersError(format!("{}", e)))?;
 
                 if let Err(e) = conection_result {
-                    #[cfg(debug_assertions)]
-                    eprintln!("{}", e);
+                    // #[cfg(debug_assertions)]
+                    // eprintln!("{}", e);
                 }
-                // println!("{}", handles.len())
             }
         }
 
