@@ -32,6 +32,10 @@ impl Bitfield {
         self.bitfield.len()
     }
 
+    pub fn iter(&self) -> std::slice::Iter<bool> {
+        self.bitfield.iter()
+    }
+
     pub fn set(&mut self, index: usize, value: bool) -> Result<(), OutOfBoundsError> {
         if index >= self.bitfield.len() {
             return Err(OutOfBoundsError {

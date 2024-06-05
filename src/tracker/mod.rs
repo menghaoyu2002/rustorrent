@@ -2,12 +2,10 @@ use std::{
     fmt::{Debug, Display},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
-    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
 use rand::Rng;
-use tokio::time::sleep;
 
 use crate::{
     bencode::{BencodeString, BencodeValue},

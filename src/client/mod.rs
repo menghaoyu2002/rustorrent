@@ -6,6 +6,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use pieces::Pieces;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -16,6 +17,7 @@ use tokio::{
 
 mod bitfield;
 mod message;
+mod pieces;
 
 use crate::{
     client::message::{receive_message, send_message},
@@ -29,7 +31,6 @@ use self::{
 
 const PSTR: &[u8; 19] = b"BitTorrent protocol";
 const HANDSHAKE_LEN: usize = 49 + PSTR.len();
-const REQUEST_LEN: u32 = 2 << 14;
 
 pub struct PeerConnectionError {
     pub peer: Peer,
@@ -129,43 +130,46 @@ impl PeerState {
 pub struct Client {
     tracker: Tracker,
     peers: Arc<RwLock<HashMap<Vec<u8>, Arc<RwLock<PeerState>>>>>,
-    bitfield: Bitfield,
+    pieces: Arc<RwLock<Pieces>>,
     send_queue: Arc<Mutex<VecDeque<(Vec<u8>, Message)>>>,
     receive_queue: Arc<Mutex<VecDeque<(Vec<u8>, Message)>>>,
 }
 
 impl Client {
     pub fn new(tracker: Tracker) -> Self {
-        let bitfield = Bitfield::new(tracker.get_metainfo().get_peices().len());
+        let pieces = Pieces::new(&tracker.get_metainfo().info);
         Self {
             tracker,
             peers: Arc::new(RwLock::new(HashMap::new())),
-            bitfield,
+            pieces: Arc::new(RwLock::new(pieces)),
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
     pub async fn download(&mut self) -> Result<(), ClientError> {
-        self.connect_to_peers(30).await?;
+        self.connect_to_peers(10).await?;
 
         let _ = tokio::join!(
             self.send_messages(),
             self.retrieve_messages(),
-            self.keep_alive(),
             self.process_messages(),
+            self.keep_alive(),
         );
 
         Ok(())
     }
 
-    fn process_messages(&self) -> JoinHandle<()> {
+    async fn process_messages(&self) -> JoinHandle<()> {
         let peers = Arc::clone(&self.peers);
         let receive_queue = Arc::clone(&self.receive_queue);
-        let bitfield_len = self.bitfield.len();
+        let pieces = Arc::clone(&self.pieces);
+        let num_pieces = self.pieces.read().await.len();
+
         tokio::spawn(async move {
             loop {
                 let Some((peer_id, message)) = receive_queue.lock().await.pop_front() else {
+                    yield_now().await;
                     continue;
                 };
 
@@ -200,7 +204,7 @@ impl Client {
                             let payload = message.get_payload();
                             let piece_index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
                             if peer.write().await.bitfield.is_none() {
-                                peer.write().await.bitfield = Some(Bitfield::new(bitfield_len));
+                                peer.write().await.bitfield = Some(Bitfield::new(num_pieces));
                             };
 
                             should_remove = peer
@@ -211,13 +215,20 @@ impl Client {
                                 .unwrap()
                                 .set(piece_index as usize, true)
                                 .is_err();
+
+                            pieces
+                                .write()
+                                .await
+                                .add_peer_have(&peer_id, piece_index as usize);
                         }
                         MessageId::Bitfield => {
                             let payload = message.get_payload();
-                            if payload.len() * 8 < bitfield_len {
+                            if payload.len() * 8 < num_pieces {
+                                println!("Invalid bitfield length, disconnecting peer...");
                                 should_remove = true;
                             } else {
-                                let bitfield = Bitfield::from_bytes(payload, bitfield_len);
+                                let bitfield = Bitfield::from_bytes(payload, num_pieces);
+                                pieces.write().await.add_peer_count(&peer_id, &bitfield);
                                 peer.write().await.bitfield = Some(bitfield);
                             }
                         }
@@ -275,6 +286,7 @@ impl Client {
                                     .push_back((peer_id.clone(), message));
                             }
                             Err(ReceiveError::WouldBlock) => {
+                                yield_now().await;
                                 continue;
                             }
                             Err(e) => {
@@ -351,8 +363,6 @@ impl Client {
                         }
                     }
                 }
-
-                // yield_now().await;
             }
         })
     }
@@ -451,7 +461,7 @@ impl Client {
                 let info_hash = self.tracker.get_metainfo().get_info_hash().map_err(|_| {
                     ClientError::GetPeersError(String::from("Failed to get info hash"))
                 })?;
-                let bitfield = self.bitfield.to_bytes();
+                let bitfield = self.pieces.read().await.to_bitfield().to_bytes();
 
                 let peers = Arc::clone(&mut self.peers);
                 let send_queue = Arc::clone(&self.send_queue);
