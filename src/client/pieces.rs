@@ -24,12 +24,12 @@ pub struct Piece {
 }
 
 #[derive(Debug)]
-pub struct Pieces {
+pub struct PieceScheduler {
     pieces: Vec<Piece>,
     any_complete: bool,
 }
 
-impl Pieces {
+impl PieceScheduler {
     pub fn new(info_dict: &Info) -> Self {
         let (piece_hashes, piece_length, file_size) = match info_dict {
             Info::SingleFile(info) => (
@@ -100,15 +100,18 @@ impl Pieces {
         bitfield
     }
 
-    fn get_rarest_noncompleted_piece(&self) -> &Piece {
+    fn get_rarest_noncompleted_piece(&self, peer_id: &Vec<u8>) -> Option<&Piece> {
         self.pieces
             .iter()
-            .filter(|p| !p.completed && p.blocks.iter().any(|b| !b.requested))
+            .filter(|p| {
+                !p.completed
+                    && p.blocks.iter().any(|b| !b.requested && b.data.is_empty())
+                    && p.peers.contains(peer_id)
+            })
             .min_by_key(|p| p.peers.len())
-            .unwrap()
     }
 
-    pub fn set_requested(&mut self, index: usize, begin: u32) {
+    fn set_requested(&mut self, index: usize, begin: u32) {
         let piece = &mut self.pieces[index];
 
         let block_bucket: usize = begin.div_ceil(BLOCK_SIZE).try_into().unwrap();
@@ -136,32 +139,56 @@ impl Pieces {
         self.pieces[i].peers.insert(peer_id.clone());
     }
 
-    pub fn remove_peer_count(&mut self, peer_id: &Vec<u8>, bitfield: &Bitfield) {
-        for (i, bit) in bitfield.iter().enumerate() {
-            if *bit {
-                self.pieces[i].peers.remove(peer_id);
-            }
+    pub fn remove_peer_count(&mut self, peer_id: &Vec<u8>) {
+        for piece in &mut self.pieces {
+            piece.peers.remove(peer_id);
         }
     }
 
-    pub fn get_block_to_download(&mut self) -> (usize, u32, u32) {
+    pub fn schedule_piece(&mut self, peer_id: &Vec<u8>) -> Option<(u32, u32, u32)> {
         let piece = if !self.any_complete {
             let pieces = self
                 .pieces
                 .iter()
-                .filter(|p| !p.completed && p.blocks.iter().any(|b| !b.requested))
+                .filter(|p| {
+                    !p.completed
+                        && p.blocks.iter().any(|b| !b.requested)
+                        && p.peers.contains(peer_id)
+                })
                 .collect::<Vec<&Piece>>();
-            pieces[rand::random::<usize>() % pieces.len()]
+
+            if pieces.is_empty() {
+                None
+            } else {
+                Some(pieces[rand::random::<usize>() % pieces.len()])
+            }
         } else {
-            self.get_rarest_noncompleted_piece()
+            self.get_rarest_noncompleted_piece(peer_id)
         };
 
-        let block = piece
-            .blocks
-            .iter()
-            .find(|b| !b.requested && b.data.is_empty())
-            .unwrap();
+        let request = piece.map(|piece| {
+            let block = piece
+                .blocks
+                .iter()
+                .find(|b| !b.requested && b.data.is_empty())
+                .unwrap();
+            (piece.index as u32, block.begin, block.length)
+        });
 
-        (piece.index, block.begin, block.length)
+        if let Some((piece_index, block_begin, _)) = &request {
+            self.set_requested(*piece_index as usize, *block_begin);
+        }
+
+        request
+    }
+
+    pub fn is_interested(&self, bitfield: &Bitfield) -> bool {
+        for (i, bit) in bitfield.iter().enumerate() {
+            // if the peer has a piece that isn't completed
+            if !self.pieces[i].completed && *bit {
+                return true;
+            }
+        }
+        false
     }
 }

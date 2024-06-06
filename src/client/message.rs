@@ -237,8 +237,9 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
     let mut message = vec![0u8; len as usize];
     let mut bytes_read = 0;
     while bytes_read < len as usize {
+        let mut buffer = vec![0u8; len as usize];
         stream.readable().await.unwrap();
-        match stream.try_read(&mut message) {
+        match stream.try_read(&mut buffer) {
             Ok(0) => {
                 return Err(ReceiveError::ReceiveError(ReceiveMessageError {
                     error: "stream was closed".to_string(),
@@ -246,6 +247,7 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
             }
             Ok(n) => {
                 bytes_read += n;
+                message.extend_from_slice(&buffer[..n - 1]);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 yield_now().await;

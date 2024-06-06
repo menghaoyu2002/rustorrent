@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use pieces::Pieces;
+use pieces::PieceScheduler;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -130,25 +130,25 @@ impl PeerState {
 pub struct Client {
     tracker: Tracker,
     peers: Arc<RwLock<HashMap<Vec<u8>, Arc<RwLock<PeerState>>>>>,
-    pieces: Arc<RwLock<Pieces>>,
+    piece_scheduler: Arc<RwLock<PieceScheduler>>,
     send_queue: Arc<Mutex<VecDeque<(Vec<u8>, Message)>>>,
     receive_queue: Arc<Mutex<VecDeque<(Vec<u8>, Message)>>>,
 }
 
 impl Client {
     pub fn new(tracker: Tracker) -> Self {
-        let pieces = Pieces::new(&tracker.get_metainfo().info);
+        let piece_scheduler = PieceScheduler::new(&tracker.get_metainfo().info);
         Self {
             tracker,
             peers: Arc::new(RwLock::new(HashMap::new())),
-            pieces: Arc::new(RwLock::new(pieces)),
+            piece_scheduler: Arc::new(RwLock::new(piece_scheduler)),
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
     pub async fn download(&mut self) -> Result<(), ClientError> {
-        self.connect_to_peers(10).await?;
+        self.connect_to_peers(30).await?;
 
         let _ = tokio::join!(
             self.send_messages(),
@@ -163,8 +163,9 @@ impl Client {
     async fn process_messages(&self) -> JoinHandle<()> {
         let peers = Arc::clone(&self.peers);
         let receive_queue = Arc::clone(&self.receive_queue);
-        let pieces = Arc::clone(&self.pieces);
-        let num_pieces = self.pieces.read().await.len();
+        let piece_scheduler = Arc::clone(&self.piece_scheduler);
+        let num_pieces = self.piece_scheduler.read().await.len();
+        let send_queue = Arc::clone(&self.send_queue);
 
         tokio::spawn(async move {
             loop {
@@ -181,24 +182,50 @@ impl Client {
                         continue;
                     };
 
+                    let message_id = message.get_id();
                     println!(
                         "Processing \"{}\" message from {}",
-                        message.get_id(),
+                        message_id,
                         String::from_utf8_lossy(&peer_id)
                     );
-
-                    match message.get_id() {
+                    match message_id {
                         MessageId::Choke => {
                             peer.write().await.peer_choking = true;
                         }
                         MessageId::Unchoke => {
                             peer.write().await.peer_choking = false;
+
+                            let scheduled_piece =
+                                piece_scheduler.write().await.schedule_piece(&peer_id);
+
+                            match scheduled_piece {
+                                Some((index, begin, length)) => {
+                                    if !peer.read().await.peer_choking {
+                                        let mut payload = Vec::new();
+                                        payload.extend_from_slice(&index.to_be_bytes());
+                                        payload.extend_from_slice(&begin.to_be_bytes());
+                                        payload.extend_from_slice(&length.to_be_bytes());
+                                        let message = Message::new(MessageId::Request, &payload);
+                                        send_queue
+                                            .lock()
+                                            .await
+                                            .push_back((peer_id.clone(), message));
+                                    }
+                                }
+                                None => send_queue.lock().await.push_back((
+                                    peer_id.clone(),
+                                    Message::new(MessageId::NotInterested, &Vec::new()),
+                                )),
+                            };
                         }
                         MessageId::Interested => {
                             peer.write().await.peer_interested = true;
+                            // figure out how to choke
                         }
                         MessageId::NotInterested => {
-                            peer.write().await.peer_interested = false;
+                            let mut peer = peer.write().await;
+                            peer.peer_interested = false;
+                            peer.am_choking = true;
                         }
                         MessageId::Have => {
                             let payload = message.get_payload();
@@ -207,16 +234,22 @@ impl Client {
                                 peer.write().await.bitfield = Some(Bitfield::new(num_pieces));
                             };
 
-                            should_remove = peer
-                                .write()
-                                .await
-                                .bitfield
-                                .as_mut()
-                                .unwrap()
-                                .set(piece_index as usize, true)
-                                .is_err();
+                            if let Some(bitfield) = &mut peer.write().await.bitfield {
+                                should_remove = bitfield.set(piece_index as usize, true).is_err();
+                                if piece_scheduler.read().await.is_interested(bitfield) {
+                                    send_queue.lock().await.push_back((
+                                        peer_id.clone(),
+                                        Message::new(MessageId::Interested, &Vec::new()),
+                                    ));
+                                } else {
+                                    send_queue.lock().await.push_back((
+                                        peer_id.clone(),
+                                        Message::new(MessageId::NotInterested, &Vec::new()),
+                                    ));
+                                }
+                            }
 
-                            pieces
+                            piece_scheduler
                                 .write()
                                 .await
                                 .add_peer_have(&peer_id, piece_index as usize);
@@ -228,12 +261,73 @@ impl Client {
                                 should_remove = true;
                             } else {
                                 let bitfield = Bitfield::from_bytes(payload, num_pieces);
-                                pieces.write().await.add_peer_count(&peer_id, &bitfield);
+
+                                piece_scheduler
+                                    .write()
+                                    .await
+                                    .add_peer_count(&peer_id, &bitfield);
+
+                                if piece_scheduler.read().await.is_interested(&bitfield) {
+                                    send_queue.lock().await.push_back((
+                                        peer_id.clone(),
+                                        Message::new(MessageId::Interested, &Vec::new()),
+                                    ));
+                                } else {
+                                    send_queue.lock().await.push_back((
+                                        peer_id.clone(),
+                                        Message::new(MessageId::NotInterested, &Vec::new()),
+                                    ));
+                                }
+
                                 peer.write().await.bitfield = Some(bitfield);
                             }
                         }
                         MessageId::Request => {}
-                        MessageId::Piece => {}
+                        MessageId::Piece => {
+                            let payload = message.get_payload();
+                            let index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
+                            let begin = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+                            let block = &payload[8..];
+                            piece_scheduler.write().await.set_block(
+                                index as usize,
+                                begin,
+                                block.to_vec(),
+                            );
+
+                            let peer = peer.read().await;
+                            if piece_scheduler
+                                .read()
+                                .await
+                                .is_interested(peer.bitfield.as_ref().unwrap())
+                            {
+                                if peer.peer_choking {
+                                    send_queue.lock().await.push_back((
+                                        peer_id.clone(),
+                                        Message::new(MessageId::Interested, &Vec::new()),
+                                    ));
+                                } else {
+                                    if let Some((index, begin, length)) =
+                                        piece_scheduler.write().await.schedule_piece(&peer_id)
+                                    {
+                                        let mut payload = Vec::new();
+                                        payload.extend_from_slice(&index.to_be_bytes());
+                                        payload.extend_from_slice(&begin.to_be_bytes());
+                                        payload.extend_from_slice(&length.to_be_bytes());
+                                        send_queue.lock().await.push_back((
+                                            peer_id.clone(),
+                                            Message::new(MessageId::Request, &payload),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                if !peer.peer_choking {
+                                    send_queue.lock().await.push_back((
+                                        peer_id.clone(),
+                                        Message::new(MessageId::NotInterested, &Vec::new()),
+                                    ));
+                                }
+                            }
+                        }
                         MessageId::Cancel => {}
                         MessageId::KeepAlive => {}
                         MessageId::Port => {}
@@ -242,7 +336,10 @@ impl Client {
 
                 if should_remove {
                     peers.write().await.remove(&peer_id);
+                    piece_scheduler.write().await.remove_peer_count(&peer_id);
                 }
+
+                yield_now().await;
             }
         })
     }
@@ -267,6 +364,7 @@ impl Client {
     fn retrieve_messages(&self) -> JoinHandle<()> {
         let peers = Arc::clone(&self.peers);
         let receive_queue = Arc::clone(&self.receive_queue);
+        let piece_scheduler = Arc::clone(&self.piece_scheduler);
         tokio::spawn(async move {
             let mut peers_to_remove = Vec::new();
             loop {
@@ -302,9 +400,11 @@ impl Client {
 
                     peer.write().await.last_touch = Utc::now();
                 }
+                yield_now().await;
 
                 for peer_id in &peers_to_remove {
                     if peers.write().await.remove(peer_id).is_some() {
+                        piece_scheduler.write().await.remove_peer_count(&peer_id);
                         println!(
                             "Disconnected from peer: {:?}",
                             String::from_utf8_lossy(&peer_id)
@@ -318,6 +418,7 @@ impl Client {
     fn send_messages(&self) -> JoinHandle<()> {
         let peers = Arc::clone(&self.peers);
         let send_queue = Arc::clone(&self.send_queue);
+        let piece_scheduler = Arc::clone(&self.piece_scheduler);
         tokio::spawn(async move {
             loop {
                 let Some((peer_id, message)) = send_queue.lock().await.pop_front() else {
@@ -349,6 +450,7 @@ impl Client {
                     }
                     Err(SendError::WouldBlock) => {
                         send_queue.lock().await.push_back((peer_id, message));
+                        yield_now().await;
                     }
                     Err(_) => {
                         println!(
@@ -356,6 +458,7 @@ impl Client {
                             String::from_utf8_lossy(&peer_id)
                         );
                         if peers.write().await.remove(&peer_id).is_some() {
+                            piece_scheduler.write().await.remove_peer_count(&peer_id);
                             println!(
                                 "Disconnected from peer: {:?}",
                                 String::from_utf8_lossy(&peer_id)
@@ -461,7 +564,7 @@ impl Client {
                 let info_hash = self.tracker.get_metainfo().get_info_hash().map_err(|_| {
                     ClientError::GetPeersError(String::from("Failed to get info hash"))
                 })?;
-                let bitfield = self.pieces.read().await.to_bitfield().to_bytes();
+                let bitfield = self.piece_scheduler.read().await.to_bitfield().to_bytes();
 
                 let peers = Arc::clone(&mut self.peers);
                 let send_queue = Arc::clone(&self.send_queue);
