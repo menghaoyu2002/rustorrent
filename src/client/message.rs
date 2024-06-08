@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use tokio::{io::AsyncReadExt, net::TcpStream, task::yield_now};
+use tokio::{net::TcpStream, task::yield_now};
 
 pub enum MessageId {
     Choke = 0,
@@ -174,9 +174,10 @@ impl Display for Message {
 
 pub async fn send_message(stream: &TcpStream, message: &Message) -> Result<(), SendError> {
     let mut bytes_written = 0;
-    while bytes_written < message.serialize().len() {
+    let serialized_message = message.serialize();
+    while bytes_written < serialized_message.len() {
         stream.writable().await.unwrap();
-        match stream.try_write(&message.serialize()) {
+        match stream.try_write(&serialized_message[bytes_written..]) {
             Ok(0) => {
                 return Err(SendError::SendError(SendMessageError {
                     message: message.clone(),
@@ -205,7 +206,7 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
     let mut bytes_read = 0;
     while bytes_read < 4 {
         stream.readable().await.unwrap();
-        match stream.try_read(&mut len) {
+        match stream.try_read(&mut len[bytes_read..]) {
             Ok(0) => {
                 return Err(ReceiveError::ReceiveError(ReceiveMessageError {
                     error: "stream was closed".to_string(),
@@ -233,12 +234,11 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
         });
     }
 
-    let mut message = Vec::new();
+    let mut message = vec![0u8; len as usize];
     let mut bytes_read = 0;
     while bytes_read < len as usize {
-        let mut buffer = vec![0u8; len as usize];
         stream.readable().await.unwrap();
-        match stream.try_read(&mut buffer) {
+        match stream.try_read(&mut message[bytes_read..]) {
             Ok(0) => {
                 return Err(ReceiveError::ReceiveError(ReceiveMessageError {
                     error: "stream was closed".to_string(),
@@ -246,7 +246,6 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
             }
             Ok(n) => {
                 bytes_read += n;
-                message.extend_from_slice(&buffer[..n]);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 yield_now().await;

@@ -11,7 +11,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{Mutex, RwLock},
-    task::{yield_now, JoinHandle, JoinSet},
+    task::{JoinHandle, JoinSet},
     time::timeout,
 };
 
@@ -170,7 +170,6 @@ impl Client {
         tokio::spawn(async move {
             loop {
                 let Some((peer_id, message)) = receive_queue.lock().await.pop_front() else {
-                    yield_now().await;
                     continue;
                 };
 
@@ -338,8 +337,6 @@ impl Client {
                     peers.write().await.remove(&peer_id);
                     piece_scheduler.write().await.remove_peer_count(&peer_id);
                 }
-
-                yield_now().await;
             }
         })
     }
@@ -384,7 +381,6 @@ impl Client {
                                     .push_back((peer_id.clone(), message));
                             }
                             Err(ReceiveError::WouldBlock) => {
-                                yield_now().await;
                                 continue;
                             }
                             Err(e) => {
@@ -400,7 +396,6 @@ impl Client {
 
                     peer.write().await.last_touch = Utc::now();
                 }
-                yield_now().await;
 
                 for peer_id in &peers_to_remove {
                     if peers.write().await.remove(peer_id).is_some() {
@@ -422,7 +417,6 @@ impl Client {
         tokio::spawn(async move {
             loop {
                 let Some((peer_id, message)) = send_queue.lock().await.pop_front() else {
-                    yield_now().await;
                     continue;
                 };
 
@@ -450,7 +444,6 @@ impl Client {
                     }
                     Err(SendError::WouldBlock) => {
                         send_queue.lock().await.push_back((peer_id, message));
-                        yield_now().await;
                     }
                     Err(_) => {
                         println!(
