@@ -11,7 +11,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{Mutex, RwLock},
-    task::{JoinHandle, JoinSet},
+    task::{yield_now, JoinHandle, JoinSet},
     time::timeout,
 };
 
@@ -129,7 +129,7 @@ impl PeerState {
 
 pub struct Client {
     tracker: Tracker,
-    peers: Arc<RwLock<HashMap<Vec<u8>, Arc<RwLock<PeerState>>>>>,
+    peers: Arc<RwLock<HashMap<Vec<u8>, Arc<Mutex<PeerState>>>>>,
     piece_scheduler: Arc<RwLock<PieceScheduler>>,
     send_queue: Arc<Mutex<VecDeque<(Vec<u8>, Message)>>>,
     receive_queue: Arc<Mutex<VecDeque<(Vec<u8>, Message)>>>,
@@ -148,7 +148,7 @@ impl Client {
     }
 
     pub async fn download(&mut self) -> Result<(), ClientError> {
-        self.connect_to_peers(30).await?;
+        self.connect_to_peers(10).await?;
 
         let _ = tokio::join!(
             self.send_messages(),
@@ -169,6 +169,7 @@ impl Client {
 
         tokio::spawn(async move {
             loop {
+                // println!("Processing messages...");
                 let Some((peer_id, message)) = receive_queue.lock().await.pop_front() else {
                     continue;
                 };
@@ -189,17 +190,17 @@ impl Client {
                     );
                     match message_id {
                         MessageId::Choke => {
-                            peer.write().await.peer_choking = true;
+                            peer.lock().await.peer_choking = true;
                         }
                         MessageId::Unchoke => {
-                            peer.write().await.peer_choking = false;
+                            peer.lock().await.peer_choking = false;
 
                             let scheduled_piece =
                                 piece_scheduler.write().await.schedule_piece(&peer_id);
 
                             match scheduled_piece {
                                 Some((index, begin, length)) => {
-                                    if !peer.read().await.peer_choking {
+                                    if !peer.lock().await.peer_choking {
                                         let mut payload = Vec::new();
                                         payload.extend_from_slice(&index.to_be_bytes());
                                         payload.extend_from_slice(&begin.to_be_bytes());
@@ -218,22 +219,22 @@ impl Client {
                             };
                         }
                         MessageId::Interested => {
-                            peer.write().await.peer_interested = true;
+                            peer.lock().await.peer_interested = true;
                             // figure out how to choke
                         }
                         MessageId::NotInterested => {
-                            let mut peer = peer.write().await;
+                            let mut peer = peer.lock().await;
                             peer.peer_interested = false;
                             peer.am_choking = true;
                         }
                         MessageId::Have => {
                             let payload = message.get_payload();
                             let piece_index = u32::from_be_bytes(payload[0..4].try_into().unwrap());
-                            if peer.write().await.bitfield.is_none() {
-                                peer.write().await.bitfield = Some(Bitfield::new(num_pieces));
+                            if peer.lock().await.bitfield.is_none() {
+                                peer.lock().await.bitfield = Some(Bitfield::new(num_pieces));
                             };
 
-                            if let Some(bitfield) = &mut peer.write().await.bitfield {
+                            if let Some(bitfield) = &mut peer.lock().await.bitfield {
                                 should_remove = bitfield.set(piece_index as usize, true).is_err();
                                 if piece_scheduler.read().await.is_interested(bitfield) {
                                     send_queue.lock().await.push_back((
@@ -278,7 +279,7 @@ impl Client {
                                     ));
                                 }
 
-                                peer.write().await.bitfield = Some(bitfield);
+                                peer.lock().await.bitfield = Some(bitfield);
                             }
                         }
                         MessageId::Request => {}
@@ -293,7 +294,7 @@ impl Client {
                                 block.to_vec(),
                             );
 
-                            let peer = peer.read().await;
+                            let peer = peer.lock().await;
                             if piece_scheduler
                                 .read()
                                 .await
@@ -347,7 +348,7 @@ impl Client {
         tokio::spawn(async move {
             loop {
                 for (peer_id, peer) in peers.read().await.iter() {
-                    if (Utc::now() - peer.read().await.last_touch).num_seconds() > 60 {
+                    if (Utc::now() - peer.lock().await.last_touch).num_seconds() > 60 {
                         send_queue.lock().await.push_back((
                             peer_id.clone(),
                             Message::new(MessageId::KeepAlive, &Vec::new()),
@@ -365,36 +366,34 @@ impl Client {
         tokio::spawn(async move {
             let mut peers_to_remove = Vec::new();
             loop {
+                // println!("Retrieving messages...");
                 for (peer_id, peer) in peers.read().await.iter() {
-                    {
-                        let stream = &peer.read().await.stream;
-                        match receive_message(stream).await {
-                            Ok(message) => {
-                                println!(
-                                    "Received \"{}\" message from {}",
-                                    message.get_id(),
-                                    String::from_utf8_lossy(peer_id)
-                                );
-                                receive_queue
-                                    .lock()
-                                    .await
-                                    .push_back((peer_id.clone(), message));
-                            }
-                            Err(ReceiveError::WouldBlock) => {
-                                continue;
-                            }
-                            Err(e) => {
-                                println!(
-                                    "Failed to receive message from peer {:?}: {}",
-                                    String::from_utf8_lossy(peer_id),
-                                    e.to_string()
-                                );
-                                peers_to_remove.push(peer_id.clone());
-                            }
+                    match receive_message(&peer.lock().await.stream).await {
+                        Ok(message) => {
+                            println!(
+                                "Received \"{}\" message from {}",
+                                message.get_id(),
+                                String::from_utf8_lossy(peer_id)
+                            );
+                            receive_queue
+                                .lock()
+                                .await
+                                .push_back((peer_id.clone(), message));
+                        }
+                        Err(ReceiveError::WouldBlock) => {
+                            // continue;
+                        }
+                        Err(e) => {
+                            println!(
+                                "Failed to receive message from peer {:?}: {}",
+                                String::from_utf8_lossy(peer_id),
+                                e.to_string()
+                            );
+                            peers_to_remove.push(peer_id.clone());
                         }
                     }
-
-                    peer.write().await.last_touch = Utc::now();
+                    peer.lock().await.last_touch = Utc::now();
+                    yield_now().await;
                 }
 
                 for peer_id in &peers_to_remove {
@@ -416,6 +415,7 @@ impl Client {
         let piece_scheduler = Arc::clone(&self.piece_scheduler);
         tokio::spawn(async move {
             loop {
+                // println!("Sending messages...");
                 let Some((peer_id, message)) = send_queue.lock().await.pop_front() else {
                     continue;
                 };
@@ -427,9 +427,9 @@ impl Client {
                         continue;
                     };
 
-                    let stream = &peer.read().await.stream;
+                    let stream = &peer.lock().await.stream;
                     println!(
-                        "Sending \"{}\" message from {}",
+                        "Sending \"{}\" message to {}",
                         message.get_id(),
                         String::from_utf8_lossy(&peer_id)
                     );
@@ -439,7 +439,7 @@ impl Client {
                 match send_result {
                     Ok(()) => {
                         let id_to_peer = peers.read().await;
-                        let mut peer = id_to_peer.get(&peer_id).unwrap().write().await;
+                        let mut peer = id_to_peer.get(&peer_id).unwrap().lock().await;
                         peer.last_touch = Utc::now();
                     }
                     Err(SendError::WouldBlock) => {
@@ -600,7 +600,7 @@ impl Client {
                     ));
                     peers.write().await.insert(
                         peer_id.clone(),
-                        Arc::new(RwLock::new(PeerState::new(&peer_id, stream))),
+                        Arc::new(Mutex::new(PeerState::new(&peer_id, stream))),
                     );
 
                     println!("Connected to peer: {:?}", peer.addr);
