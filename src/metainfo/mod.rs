@@ -9,7 +9,7 @@ use crate::bencode::{BencodeString, BencodeValue};
 pub struct BaseInfo {
     // shared by both single and multi file mode
     pub pieces: Vec<Vec<u8>>,
-    pub piece_length: i64,
+    pub piece_length: u64,
     pub private: Option<i64>,
 }
 
@@ -17,14 +17,14 @@ pub struct BaseInfo {
 pub struct SingleFileInfo {
     pub base_info: BaseInfo,
     pub name: String,
-    pub length: i64,
+    pub length: u64,
     pub md5sum: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct FileData {
     pub path: Vec<String>,
-    pub length: i64,
+    pub length: u64,
     pub md5sum: Option<String>,
 }
 
@@ -83,6 +83,13 @@ impl Metainfo {
         }
     }
 
+    pub fn get_length(&self) -> u64 {
+        match &self.info {
+            Info::SingleFile(info) => info.length,
+            Info::MultiFile(info) => info.files.iter().map(|f| f.length).sum(),
+        }
+    }
+
     pub fn get_info_hash(&self) -> Result<Vec<u8>, MetaInfoError> {
         let info = match self.torrent_content.get_value("info") {
             Some(info) => info,
@@ -128,7 +135,7 @@ impl Metainfo {
         };
 
         let piece_length = match dict.get("piece length") {
-            Some(BencodeValue::Int(i)) => *i,
+            Some(BencodeValue::Int(i)) => *i as u64,
             _ => {
                 return Err(MetaInfoError::InvalidAttribute(AttributeError {
                     content: BencodeValue::Dict(dict.clone()),
@@ -171,7 +178,7 @@ impl Metainfo {
         };
 
         let length = match dict.get("length") {
-            Some(BencodeValue::Int(i)) => *i,
+            Some(BencodeValue::Int(i)) => *i as u64,
             _ => {
                 return Err(MetaInfoError::InvalidAttribute(AttributeError {
                     content: BencodeValue::Dict(dict.clone()),
@@ -225,7 +232,7 @@ impl Metainfo {
                 }?;
 
                 let length = match file_dict.get("length") {
-                    Some(BencodeValue::Int(i)) => *i,
+                    Some(BencodeValue::Int(i)) => *i as u64,
                     _ => {
                         return Err(MetaInfoError::InvalidAttribute(AttributeError {
                             content: BencodeValue::Dict(file_dict.clone()),

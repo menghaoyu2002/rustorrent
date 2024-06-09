@@ -31,6 +31,7 @@ use self::{
 
 const PSTR: &[u8; 19] = b"BitTorrent protocol";
 const HANDSHAKE_LEN: usize = 49 + PSTR.len();
+const MB: u64 = 1 << 20;
 
 pub struct PeerConnectionError {
     pub peer: Peer,
@@ -133,6 +134,8 @@ pub struct Client {
     piece_scheduler: Arc<RwLock<PieceScheduler>>,
     send_queue: Arc<Mutex<VecDeque<(Vec<u8>, Message)>>>,
     receive_queue: Arc<Mutex<VecDeque<(Vec<u8>, Message)>>>,
+    total_downloaded: Arc<Mutex<u64>>,
+    start_time: DateTime<Utc>,
 }
 
 impl Client {
@@ -144,11 +147,13 @@ impl Client {
             piece_scheduler: Arc::new(RwLock::new(piece_scheduler)),
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
+            total_downloaded: Arc::new(Mutex::new(0)),
+            start_time: Utc::now(),
         }
     }
 
     pub async fn download(&mut self) -> Result<(), ClientError> {
-        self.connect_to_peers(30).await?;
+        self.connect_to_peers(10).await?;
 
         let _ = tokio::join!(
             self.send_messages(),
@@ -166,6 +171,9 @@ impl Client {
         let piece_scheduler = Arc::clone(&self.piece_scheduler);
         let num_pieces = self.piece_scheduler.read().await.len();
         let send_queue = Arc::clone(&self.send_queue);
+        let total_downloaded = Arc::clone(&self.total_downloaded);
+        let total_length = self.tracker.get_metainfo().get_length() as u64;
+        let start_time = self.start_time;
 
         tokio::spawn(async move {
             loop {
@@ -292,6 +300,18 @@ impl Client {
                                 index as usize,
                                 begin,
                                 block.to_vec(),
+                            );
+                            *total_downloaded.lock().await += block.len() as u64;
+                            let total_downloaded = *total_downloaded.lock().await;
+                            println!(
+                                "{:.2}/{:.2}MB - {:.2}% {:.2}MB/s",
+                                total_downloaded as f64 / MB as f64,
+                                total_length as f64 / MB as f64,
+                                total_downloaded as f64 / total_length as f64 * 100.0,
+                                total_downloaded as f64
+                                    / MB as f64
+                                    / Utc::now().signed_duration_since(start_time).num_seconds()
+                                        as f64,
                             );
 
                             let peer = peer.lock().await;
