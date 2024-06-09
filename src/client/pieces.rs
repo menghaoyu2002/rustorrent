@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::metainfo::Info;
 
-use super::bitfield::Bitfield;
+use super::{bitfield::Bitfield, file_manager::FileManager};
 
 pub const BLOCK_SIZE: u32 = 2 << 13; // 16KB
 
@@ -10,8 +10,8 @@ pub const BLOCK_SIZE: u32 = 2 << 13; // 16KB
 pub struct Block {
     begin: u32,
     length: u32,
-    data: Vec<u8>,
     requested: bool,
+    completed: bool,
 }
 
 #[derive(Debug)]
@@ -26,12 +26,13 @@ pub struct Piece {
 #[derive(Debug)]
 pub struct PieceScheduler {
     pieces: Vec<Piece>,
+    file_manager: FileManager,
     any_complete: bool,
 }
 
 impl PieceScheduler {
-    pub fn new(info_dict: &Info) -> Self {
-        let (piece_hashes, piece_length, file_size) = match info_dict {
+    pub fn new(info_dict: &Info, output_dir: String) -> Self {
+        let (piece_hashes, piece_length, total_size) = match info_dict {
             Info::SingleFile(info) => (
                 info.base_info.pieces.clone(),
                 info.base_info.piece_length,
@@ -49,7 +50,7 @@ impl PieceScheduler {
             "piece length must be a multiple of the block size"
         );
 
-        let mut remaining_size = file_size as u32;
+        let mut remaining_size = total_size as u32;
         let mut pieces = Vec::new();
         for (i, hash) in piece_hashes.iter().enumerate() {
             let mut blocks = Vec::new();
@@ -63,8 +64,8 @@ impl PieceScheduler {
                 let block = Block {
                     begin: offset,
                     length,
-                    data: Vec::new(),
                     requested: false,
+                    completed: false,
                 };
                 blocks.push(block);
 
@@ -85,6 +86,7 @@ impl PieceScheduler {
         Self {
             pieces,
             any_complete: false,
+            file_manager: FileManager::new(output_dir, info_dict),
         }
     }
 
@@ -105,7 +107,7 @@ impl PieceScheduler {
             .iter()
             .filter(|p| {
                 !p.completed
-                    && p.blocks.iter().any(|b| !b.requested && b.data.is_empty())
+                    && p.blocks.iter().any(|b| !b.requested && !b.completed)
                     && p.peers.contains(peer_id)
             })
             .min_by_key(|p| p.peers.len())
@@ -124,7 +126,8 @@ impl PieceScheduler {
 
         let block_bucket: usize = begin.div_ceil(BLOCK_SIZE).try_into().unwrap();
         let block = &mut piece.blocks[block_bucket];
-        block.data = data;
+        self.file_manager.save_block(index, begin, data);
+        block.completed = true;
     }
 
     pub fn add_peer_count(&mut self, peer_id: &Vec<u8>, bitfield: &Bitfield) {
@@ -170,7 +173,7 @@ impl PieceScheduler {
             let block = piece
                 .blocks
                 .iter()
-                .find(|b| !b.requested && b.data.is_empty())
+                .find(|b| !b.requested && !b.completed)
                 .unwrap();
             (piece.index as u32, block.begin, block.length)
         });

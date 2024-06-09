@@ -16,6 +16,7 @@ use tokio::{
 };
 
 mod bitfield;
+mod file_manager;
 mod message;
 mod pieces;
 
@@ -139,8 +140,8 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(tracker: Tracker) -> Self {
-        let piece_scheduler = PieceScheduler::new(&tracker.get_metainfo().info);
+    pub fn new(tracker: Tracker, output_dir: String) -> Self {
+        let piece_scheduler = PieceScheduler::new(&tracker.get_metainfo().info, output_dir);
         Self {
             tracker,
             peers: Arc::new(RwLock::new(HashMap::new())),
@@ -153,7 +154,7 @@ impl Client {
     }
 
     pub async fn download(&mut self) -> Result<(), ClientError> {
-        self.connect_to_peers(10).await?;
+        self.connect_to_peers(30).await?;
 
         let _ = tokio::join!(
             self.send_messages(),
@@ -176,8 +177,7 @@ impl Client {
         let start_time = self.start_time;
 
         tokio::spawn(async move {
-            loop {
-                // println!("Processing messages...");
+            while *total_downloaded.lock().await < total_length {
                 let Some((peer_id, message)) = receive_queue.lock().await.pop_front() else {
                     continue;
                 };
@@ -383,12 +383,13 @@ impl Client {
         let peers = Arc::clone(&self.peers);
         let receive_queue = Arc::clone(&self.receive_queue);
         let piece_scheduler = Arc::clone(&self.piece_scheduler);
+        let total_length = self.tracker.get_metainfo().get_length();
+        let total_downloaded = Arc::clone(&self.total_downloaded);
+
         tokio::spawn(async move {
             let mut peers_to_remove = Vec::new();
-            loop {
-                // println!("Retrieving messages...");
+            while *total_downloaded.lock().await < total_length {
                 for (peer_id, peer) in peers.read().await.iter() {
-                    // println!("pre-receive");
                     match receive_message(&peer.lock().await.stream).await {
                         Ok(message) => {
                             println!(
@@ -402,7 +403,7 @@ impl Client {
                                 .push_back((peer_id.clone(), message));
                         }
                         Err(ReceiveError::WouldBlock) => {
-                            // continue;
+                            continue;
                         }
                         Err(e) => {
                             println!(
@@ -413,7 +414,6 @@ impl Client {
                             peers_to_remove.push(peer_id.clone());
                         }
                     }
-                    // println!("post-receive");
                     peer.lock().await.last_touch = Utc::now();
                     yield_now().await;
                 }
@@ -435,9 +435,11 @@ impl Client {
         let peers = Arc::clone(&self.peers);
         let send_queue = Arc::clone(&self.send_queue);
         let piece_scheduler = Arc::clone(&self.piece_scheduler);
+        let total_length = self.tracker.get_metainfo().get_length();
+        let total_downloaded = Arc::clone(&self.total_downloaded);
+
         tokio::spawn(async move {
-            loop {
-                // println!("Sending messages...");
+            while *total_downloaded.lock().await < total_length {
                 let Some((peer_id, message)) = send_queue.lock().await.pop_front() else {
                     continue;
                 };

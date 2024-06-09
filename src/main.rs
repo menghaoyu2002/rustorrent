@@ -7,6 +7,9 @@ use rustorrent::{bencode::BencodeValue, client::Client, tracker::Tracker};
 #[command(version, about, long_about = None)]
 struct Args {
     file_path: String,
+
+    #[arg(short, long)]
+    output_dir: String,
 }
 
 fn read_file(filename: &str) -> Result<Vec<u8>, std::io::Error> {
@@ -38,7 +41,7 @@ async fn main() {
     }
 
     let tracker = Tracker::new(bencode_value).expect("Failed to create tracker");
-    let mut client = Client::new(tracker);
+    let mut client = Client::new(tracker, args.output_dir);
 
     match client.download().await {
         Ok(()) => println!("Download completed"),
