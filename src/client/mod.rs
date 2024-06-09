@@ -148,7 +148,7 @@ impl Client {
     }
 
     pub async fn download(&mut self) -> Result<(), ClientError> {
-        self.connect_to_peers(10).await?;
+        self.connect_to_peers(30).await?;
 
         let _ = tokio::join!(
             self.send_messages(),
@@ -368,6 +368,7 @@ impl Client {
             loop {
                 // println!("Retrieving messages...");
                 for (peer_id, peer) in peers.read().await.iter() {
+                    // println!("pre-receive");
                     match receive_message(&peer.lock().await.stream).await {
                         Ok(message) => {
                             println!(
@@ -392,6 +393,7 @@ impl Client {
                             peers_to_remove.push(peer_id.clone());
                         }
                     }
+                    // println!("post-receive");
                     peer.lock().await.last_touch = Utc::now();
                     yield_now().await;
                 }

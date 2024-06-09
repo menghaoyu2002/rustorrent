@@ -176,7 +176,7 @@ pub async fn send_message(stream: &TcpStream, message: &Message) -> Result<(), S
     let mut bytes_written = 0;
     let serialized_message = message.serialize();
     while bytes_written < serialized_message.len() {
-        stream.writable().await.unwrap();
+        // stream.writable().await.unwrap();
         match stream.try_write(&serialized_message[bytes_written..]) {
             Ok(0) => {
                 return Err(SendError::SendError(SendMessageError {
@@ -197,6 +197,7 @@ pub async fn send_message(stream: &TcpStream, message: &Message) -> Result<(), S
                 }));
             }
         };
+        yield_now().await;
     }
     Ok(())
 }
@@ -205,7 +206,6 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
     let mut len = [0u8; 4];
     let mut bytes_read = 0;
     while bytes_read < 4 {
-        stream.readable().await.unwrap();
         match stream.try_read(&mut len[bytes_read..]) {
             Ok(0) => {
                 return Err(ReceiveError::ReceiveError(ReceiveMessageError {
@@ -224,6 +224,7 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
                 }));
             }
         }
+        yield_now().await;
     }
     let len = u32::from_be_bytes(len);
     if len == 0 {
@@ -237,7 +238,6 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
     let mut message = vec![0u8; len as usize];
     let mut bytes_read = 0;
     while bytes_read < len as usize {
-        stream.readable().await.unwrap();
         match stream.try_read(&mut message[bytes_read..]) {
             Ok(0) => {
                 return Err(ReceiveError::ReceiveError(ReceiveMessageError {
@@ -247,15 +247,14 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
             Ok(n) => {
                 bytes_read += n;
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                yield_now().await;
-            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
                 return Err(ReceiveError::ReceiveError(ReceiveMessageError {
                     error: format!("Failed to read message: {}", e),
                 }));
             }
         }
+        yield_now().await;
     }
     let id = message[0];
     let payload = message[1..].to_vec();
