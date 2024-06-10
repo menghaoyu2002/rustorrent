@@ -224,7 +224,6 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
                 }));
             }
         }
-        yield_now().await;
     }
     let len = u32::from_be_bytes(len);
     if len == 0 {
@@ -247,14 +246,15 @@ pub async fn receive_message(stream: &TcpStream) -> Result<Message, ReceiveError
             Ok(n) => {
                 bytes_read += n;
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                yield_now().await;
+            }
             Err(e) => {
                 return Err(ReceiveError::ReceiveError(ReceiveMessageError {
                     error: format!("Failed to read message: {}", e),
                 }));
             }
         }
-        yield_now().await;
     }
     let id = message[0];
     let payload = message[1..].to_vec();

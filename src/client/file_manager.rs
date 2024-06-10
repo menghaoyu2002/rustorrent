@@ -3,6 +3,8 @@ use std::{
     os::unix::fs::FileExt,
 };
 
+use sha1::Digest;
+
 use crate::metainfo::Info;
 
 #[derive(Debug)]
@@ -59,5 +61,23 @@ impl FileManager {
             }
             accumulated_size += *file_size;
         }
+    }
+
+    pub fn verify_piece(&self, piece_index: usize, hash: &[u8]) -> bool {
+        let offset = self.piece_length * piece_index as u64;
+        let mut file_index = 0;
+        let mut accumulated_size = 0;
+        while offset >= self.files[file_index].1 + accumulated_size {
+            accumulated_size += self.files[file_index].1;
+            file_index += 1;
+        }
+        let file = &self.files[file_index].0;
+        let mut buf = vec![0; self.piece_length as usize];
+        file.read_at(&mut buf, offset).unwrap();
+
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(&buf);
+        let result = hasher.finalize().to_vec();
+        hash == result.as_slice()
     }
 }

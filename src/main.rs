@@ -10,6 +10,9 @@ struct Args {
 
     #[arg(short, long)]
     output_dir: String,
+
+    #[arg(short, long, default_value_t = 30)]
+    num_peers: u32,
 }
 
 fn read_file(filename: &str) -> Result<Vec<u8>, std::io::Error> {
@@ -43,7 +46,7 @@ async fn main() {
     let tracker = Tracker::new(bencode_value).expect("Failed to create tracker");
     let mut client = Client::new(tracker, args.output_dir);
 
-    match client.download().await {
+    match client.download(args.num_peers).await {
         Ok(()) => println!("Download completed"),
         Err(e) => eprintln!("Error downloading: {}", e),
     }

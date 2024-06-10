@@ -55,12 +55,8 @@ impl PieceScheduler {
         for (i, hash) in piece_hashes.iter().enumerate() {
             let mut blocks = Vec::new();
             let mut offset: u32 = 0;
-            while offset < (piece_length as u32).min(remaining_size) {
-                let length = if remaining_size < BLOCK_SIZE {
-                    remaining_size
-                } else {
-                    BLOCK_SIZE
-                };
+            while offset < piece_length as u32 && remaining_size > 0 {
+                let length = BLOCK_SIZE.min(remaining_size);
                 let block = Block {
                     begin: offset,
                     length,
@@ -128,6 +124,19 @@ impl PieceScheduler {
         let block = &mut piece.blocks[block_bucket];
         self.file_manager.save_block(index, begin, data);
         block.completed = true;
+        if piece.blocks.iter().all(|b| b.completed) {
+            println!("Piece {} completed", piece.index);
+            piece.completed = true;
+            self.any_complete = true;
+
+            // if !self.file_manager.verify_piece(index, &piece.hash) {
+            //     println!("Piece {} failed verification", piece.index);
+            //     for block in &mut piece.blocks {
+            //         block.completed = false;
+            //     }
+            //     piece.completed = false;
+            // }
+        }
     }
 
     pub fn add_peer_count(&mut self, peer_id: &Vec<u8>, bitfield: &Bitfield) {
@@ -178,8 +187,8 @@ impl PieceScheduler {
             (piece.index as u32, block.begin, block.length)
         });
 
-        if let Some((piece_index, block_begin, _)) = &request {
-            self.set_requested(*piece_index as usize, *block_begin);
+        if let Some((piece_index, block_begin, _)) = request {
+            self.set_requested(piece_index as usize, block_begin);
         }
 
         request

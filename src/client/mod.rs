@@ -153,11 +153,12 @@ impl Client {
         }
     }
 
-    pub async fn download(&mut self) -> Result<(), ClientError> {
-        self.connect_to_peers(30).await?;
+    pub async fn download(&mut self, num_peers: u32) -> Result<(), ClientError> {
+        self.connect_to_peers(num_peers).await?;
 
         let _ = tokio::join!(
             self.send_messages(),
+            self.retrieve_messages(),
             self.retrieve_messages(),
             self.process_messages(),
             self.keep_alive(),
@@ -179,6 +180,7 @@ impl Client {
         tokio::spawn(async move {
             while *total_downloaded.lock().await < total_length {
                 let Some((peer_id, message)) = receive_queue.lock().await.pop_front() else {
+                    yield_now().await;
                     continue;
                 };
 
@@ -314,33 +316,24 @@ impl Client {
                                         as f64,
                             );
 
-                            let peer = peer.lock().await;
-                            if piece_scheduler
-                                .read()
-                                .await
-                                .is_interested(peer.bitfield.as_ref().unwrap())
-                            {
-                                if peer.peer_choking {
+                            if peer.lock().await.peer_choking {
+                                send_queue.lock().await.push_back((
+                                    peer_id.clone(),
+                                    Message::new(MessageId::Interested, &Vec::new()),
+                                ));
+                            } else {
+                                if let Some((index, begin, length)) =
+                                    piece_scheduler.write().await.schedule_piece(&peer_id)
+                                {
+                                    let mut payload = Vec::new();
+                                    payload.extend_from_slice(&index.to_be_bytes());
+                                    payload.extend_from_slice(&begin.to_be_bytes());
+                                    payload.extend_from_slice(&length.to_be_bytes());
                                     send_queue.lock().await.push_back((
                                         peer_id.clone(),
-                                        Message::new(MessageId::Interested, &Vec::new()),
+                                        Message::new(MessageId::Request, &payload),
                                     ));
                                 } else {
-                                    if let Some((index, begin, length)) =
-                                        piece_scheduler.write().await.schedule_piece(&peer_id)
-                                    {
-                                        let mut payload = Vec::new();
-                                        payload.extend_from_slice(&index.to_be_bytes());
-                                        payload.extend_from_slice(&begin.to_be_bytes());
-                                        payload.extend_from_slice(&length.to_be_bytes());
-                                        send_queue.lock().await.push_back((
-                                            peer_id.clone(),
-                                            Message::new(MessageId::Request, &payload),
-                                        ));
-                                    }
-                                }
-                            } else {
-                                if !peer.peer_choking {
                                     send_queue.lock().await.push_back((
                                         peer_id.clone(),
                                         Message::new(MessageId::NotInterested, &Vec::new()),
@@ -403,6 +396,7 @@ impl Client {
                                 .push_back((peer_id.clone(), message));
                         }
                         Err(ReceiveError::WouldBlock) => {
+                            yield_now().await;
                             continue;
                         }
                         Err(e) => {
@@ -441,6 +435,7 @@ impl Client {
         tokio::spawn(async move {
             while *total_downloaded.lock().await < total_length {
                 let Some((peer_id, message)) = send_queue.lock().await.pop_front() else {
+                    yield_now().await;
                     continue;
                 };
 
@@ -568,9 +563,9 @@ impl Client {
         Self::validate_handshake(&response, info_hash)
     }
 
-    async fn connect_to_peers(&mut self, min_connections: usize) -> Result<(), ClientError> {
+    async fn connect_to_peers(&mut self, min_connections: u32) -> Result<(), ClientError> {
         println!("Connecting to peers...");
-        while self.peers.read().await.len() < min_connections {
+        while self.peers.read().await.len() < min_connections as usize {
             let mut handles = JoinSet::new();
             for peer in
                 self.tracker.get_peers().await.map_err(|e| {
@@ -612,7 +607,7 @@ impl Client {
                         Self::initiate_handshake(&mut stream, &handshake, &info_hash, &peer)
                             .await?;
 
-                    if peers.read().await.len() >= min_connections {
+                    if peers.read().await.len() >= min_connections as usize {
                         return Err(ClientError::GetPeersError(String::from(
                             "Already connected to minimum number of peers",
                         )));
