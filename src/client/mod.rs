@@ -358,8 +358,11 @@ impl Client {
     fn keep_alive(&self) -> JoinHandle<()> {
         let peers = Arc::clone(&self.peers);
         let send_queue = Arc::clone(&self.send_queue);
+        let total_length = self.tracker.get_metainfo().get_length();
+        let total_downloaded = Arc::clone(&self.total_downloaded);
+
         tokio::spawn(async move {
-            loop {
+            while *total_downloaded.lock().await < total_length {
                 for (peer_id, peer) in peers.read().await.iter() {
                     if (Utc::now() - peer.lock().await.last_touch).num_seconds() > 60 {
                         send_queue.lock().await.push_back((
