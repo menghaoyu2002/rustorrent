@@ -6,3 +6,4 @@ didn't do uploading just yet so this client is just a leecher (sorry 😢)
 
 some data corruption as well, hopefully i can sort that out. it's not too terrible though.
 
+still some concurrency / contention issues that make it slow for larger number of peers. it works though i think
