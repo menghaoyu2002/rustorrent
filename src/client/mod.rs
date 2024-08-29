@@ -156,22 +156,23 @@ impl Client {
     pub async fn download(&mut self, num_peers: u32) -> Result<(), ClientError> {
         self.connect_to_peers(num_peers).await?;
 
-        let _ = tokio::join!(
-            self.send_messages(),
-            self.retrieve_messages(),
-            self.retrieve_messages(),
-            self.process_messages(),
-            self.keep_alive(),
-        );
+        let mut join_set = JoinSet::new();
+        let num_pieces = self.piece_scheduler.read().await.len();
+
+        join_set.spawn(self.send_messages());
+        join_set.spawn(self.retrieve_messages());
+        join_set.spawn(self.process_messages(num_pieces));
+        join_set.spawn(self.keep_alive());
+
+        while join_set.join_next().await.is_some() {}
 
         Ok(())
     }
 
-    async fn process_messages(&self) -> JoinHandle<()> {
+    fn process_messages(&self, num_pieces: usize) -> JoinHandle<()> {
         let peers = Arc::clone(&self.peers);
         let receive_queue = Arc::clone(&self.receive_queue);
         let piece_scheduler = Arc::clone(&self.piece_scheduler);
-        let num_pieces = self.piece_scheduler.read().await.len();
         let send_queue = Arc::clone(&self.send_queue);
         let total_downloaded = Arc::clone(&self.total_downloaded);
         let total_length = self.tracker.get_metainfo().get_length() as u64;
@@ -305,15 +306,20 @@ impl Client {
                             );
                             *total_downloaded.lock().await += block.len() as u64;
                             let total_downloaded = *total_downloaded.lock().await;
+                            let now = Utc::now();
+                            let duration =
+                                now.signed_duration_since(start_time).num_seconds() as f64;
+                            let speed = if duration > 0.0 {
+                                total_downloaded as f64 / duration
+                            } else {
+                                0.0
+                            };
                             println!(
                                 "{:.2}/{:.2}MB - {:.2}% {:.2}MB/s",
                                 total_downloaded as f64 / MB as f64,
                                 total_length as f64 / MB as f64,
                                 total_downloaded as f64 / total_length as f64 * 100.0,
-                                total_downloaded as f64
-                                    / MB as f64
-                                    / Utc::now().signed_duration_since(start_time).num_seconds()
-                                        as f64,
+                                speed / MB as f64,
                             );
 
                             if peer.lock().await.peer_choking {
